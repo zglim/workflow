@@ -13,6 +13,14 @@ type RecordStore interface {
 	// must implement transactions and a separate outbox store to store the outbox record (that should be
 	// generated using MakeOutboxEventData) which can be retrieved when calling ListOutboxEvents and can be
 	// deleted when DeleteOutboxEvent is called.
+	//
+	// Store must implement optimistic locking: when updating an existing record (same RunID), the record's
+	// Meta.Version must be exactly one greater than the currently stored version. If it is not, Store must
+	// reject the write with ErrRecordVersionConflict (wrapped) and must not modify the record or append an
+	// outbox event. The version check and the write must be atomic (e.g. guarded by a lock or a row lock in
+	// the same transaction). Creating a new record is not version constrained. This is the compare-and-swap
+	// commit path that prevents concurrent writers - such as Pause/Resume racing a consumer or timeout poll
+	// commit - from clobbering each other.
 	Store(ctx context.Context, record *Record) error
 	Lookup(ctx context.Context, runID string) (*Record, error)
 	Latest(ctx context.Context, workflowName, foreignID string) (*Record, error)

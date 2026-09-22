@@ -91,6 +91,12 @@ type RecordStore interface {
 
 **Requirements**:
 - **ACID Transactions**: Required for transactional outbox pattern
+- **Optimistic Locking**: `Store` must reject an update to an existing record when its `Meta.Version`
+  is not exactly one greater than the currently stored version, returning a wrapped
+  `workflow.ErrRecordVersionConflict`. The version check and the write must be atomic (e.g. a lock or
+  a row lock within the same transaction). This is the compare-and-swap commit path that prevents
+  concurrent writers - such as `Pause`/`Resume` racing a consumer or timeout poll commit - from
+  clobbering each other. Creating a new record is not version constrained.
 - **Query Support**: Must support filtering, sorting, and pagination
 - **Schema Management**: Must handle workflow schema evolution
 

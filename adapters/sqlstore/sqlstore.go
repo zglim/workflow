@@ -54,13 +54,23 @@ func (s *SQLStore) Store(ctx context.Context, r *workflow.Record) error {
 
 	var mustCreate bool
 	if r.RunID != "" {
-		_, err := recordScan(tx.QueryRowContext(ctx, s.recordSelectPrefix+"run_id=?", r.RunID))
+		// Lock the row for the duration of the transaction so that the version check and the
+		// update are atomic - this is the optimistic locking commit path that rejects updates
+		// based on a stale snapshot of the record.
+		existing, err := recordScan(tx.QueryRowContext(ctx, s.recordSelectPrefix+"run_id=? for update", r.RunID))
 		if errors.Is(err, workflow.ErrRecordNotFound) {
 			mustCreate = true
 		} else if err != nil {
 			return err
+		} else if r.Meta.Version != existing.Meta.Version+1 {
+			return fmt.Errorf(
+				"record was modified since it was loaded: run_id=%s, expected_version=%d, actual_version=%d: %w",
+				r.RunID,
+				existing.Meta.Version+1,
+				r.Meta.Version,
+				workflow.ErrRecordVersionConflict,
+			)
 		}
-
 	} else {
 		mustCreate = true
 	}

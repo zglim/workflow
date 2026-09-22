@@ -205,6 +205,24 @@ workflow := b.Build(
 4. **Execution**: Expired timeouts trigger their timeout functions
 5. **Completion**: Successfully processed timeouts are marked as completed
 
+## Paused Records and Timeout Deadlines
+
+Timeout deadlines are **wall-clock** and keep elapsing while a record is paused - pausing does not
+extend, pause, or reset a timeout's deadline:
+
+1. **Arming**: Timeouts are armed for paused records as usual (the deadline is computed by
+   `TimerFunc` when the record is in the status, regardless of whether it is paused).
+2. **Expiry**: The expiration time is evaluated against the clock as normal. A timeout whose
+   deadline lapses during a pause becomes expired and stays expired.
+3. **Execution**: Expired timeouts of paused records are **not** executed. They remain valid
+   (neither completed nor cancelled) and are executed once the record is resumed.
+4. **Resume**: After `Resume`, the run continues from its pre-pause position and any timeout that
+   expired during the pause fires promptly - exactly once.
+
+If a record is paused after the timeout poller loaded its snapshot but before the poller commits,
+the poller's commit loses the optimistic concurrency race against the `Pause` commit and the
+timeout is skipped until the next poll - a paused record is never transitioned by the poller.
+
 ## Error Handling
 
 ### Timer Function Errors

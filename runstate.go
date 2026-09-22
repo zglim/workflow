@@ -69,6 +69,12 @@ func (rs RunState) Stopped() bool {
 }
 
 // RunStateController allows the interaction with a specific workflow run.
+//
+// All transitions are validated against the legal transition table (runStateTransitions) and are
+// committed through the RecordStore's optimistic locking path: if the record was modified since
+// the controller's record snapshot was loaded, the update is rejected with
+// ErrRecordVersionConflict and the caller must reload the record and retry. This guarantees that
+// a stale Pause/Resume cannot regress the record's status or clobber a concurrent commit.
 type RunStateController interface {
 	// Pause will take the workflow run specified and move it into a temporary state where it will no longer be processed.
 	// A paused workflow run can be resumed by calling Resume. ErrUnableToPause is returned when a workflow is not in a

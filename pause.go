@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"k8s.io/utils/clock"
@@ -120,6 +121,12 @@ func autoRetryConsumer(
 		controller := NewRunStateController(store, record)
 		err = controller.Resume(ctx)
 		if err != nil {
+			if errors.Is(err, ErrRecordVersionConflict) {
+				// The record was resumed (or otherwise modified) concurrently - the winning
+				// write emitted its own event, so this is a no-op.
+				return nil
+			}
+
 			return err
 		}
 

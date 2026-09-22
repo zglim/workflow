@@ -3,6 +3,7 @@ package memrecordstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -134,6 +135,27 @@ func (s *Store) Lookup(ctx context.Context, id string) (*workflow.Record, error)
 func (s *Store) Store(ctx context.Context, record *workflow.Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Optimistic locking: updates to an existing record must carry a version exactly one greater
+	// than the stored version. This makes the compare-and-swap commit atomic with the read that
+	// produced the record, so concurrent writers (e.g. Pause vs a consumer or timeout poll commit)
+	// cannot clobber each other - the loser is rejected and must reload.
+	if existing, ok := s.store[record.RunID]; ok {
+		if record.Meta.Version != existing.Meta.Version+1 {
+			return fmt.Errorf(
+				"record was modified since it was loaded: run_id=%s, expected_version=%d, actual_version=%d: %w",
+				record.RunID,
+				existing.Meta.Version+1,
+				record.Meta.Version,
+				workflow.ErrRecordVersionConflict,
+			)
+		}
+	}
+
+	// Store a copy of the record so that later mutations of the caller's record (e.g. version
+	// increments for a subsequent update) do not mutate the stored state.
+	stored := *record
+	record = &stored
 
 	// Add record to store
 	uk := uniqueKey(record.WorkflowName, record.ForeignID)

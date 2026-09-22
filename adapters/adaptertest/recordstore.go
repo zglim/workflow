@@ -21,6 +21,7 @@ func RunRecordStoreTest(t *testing.T, factory func() workflow.RecordStore) {
 		testLatest,
 		testLookup,
 		testStore,
+		testStoreOptimisticLocking,
 		testListOutboxEvents,
 		testDeleteOutboxEvent,
 		testList,
@@ -47,6 +48,7 @@ func testLatest(t *testing.T, factory func() workflow.RecordStore) {
 
 		expected.Status = int(statusEnd)
 		expected.RunState = workflow.RunStateCompleted
+		expected.Meta.Version++
 		err = store.Store(ctx, expected)
 		require.NoError(t, err)
 
@@ -86,6 +88,7 @@ func testStore(t *testing.T, factory func() workflow.RecordStore) {
 
 		latest.Status = int(statusMiddle)
 		expected.Status = int(statusMiddle)
+		latest.Meta.Version++
 
 		err = store.Store(ctx, latest)
 		require.NoError(t, err)
@@ -97,11 +100,60 @@ func testStore(t *testing.T, factory func() workflow.RecordStore) {
 
 		latest.Status = int(statusEnd)
 		expected.Status = int(statusEnd)
+		latest.Meta.Version++
 
 		err = store.Store(ctx, latest)
 		require.NoError(t, err)
 
 		recordIsEqual(t, *expected, *latest)
+	})
+}
+
+func testStoreOptimisticLocking(t *testing.T, factory func() workflow.RecordStore) {
+	t.Run("Store rejects stale versions with ErrRecordVersionConflict", func(t *testing.T) {
+		store := factory()
+		ctx := context.Background()
+		expected := dummyWireRecord(t, "my_workflow")
+
+		// Creating a new record is not version constrained.
+		err := store.Store(ctx, expected)
+		require.NoError(t, err)
+
+		latest, err := store.Lookup(ctx, expected.RunID)
+		require.NoError(t, err)
+
+		// An update must carry a version exactly one greater than the stored version.
+		latest.Status = int(statusMiddle)
+		latest.Meta.Version++
+		err = store.Store(ctx, latest)
+		require.NoError(t, err)
+
+		// Replaying the same update (stale version) must be rejected.
+		err = store.Store(ctx, latest)
+		require.ErrorIs(t, err, workflow.ErrRecordVersionConflict)
+
+		// Skipping a version must be rejected as well.
+		skipped := *latest
+		skipped.Meta.Version += 2
+		err = store.Store(ctx, &skipped)
+		require.ErrorIs(t, err, workflow.ErrRecordVersionConflict)
+
+		// A stale write must not clobber the winning write.
+		stale := *latest
+		stale.Status = int(statusEnd)
+		stale.RunState = workflow.RunStateCompleted
+		err = store.Store(ctx, &stale)
+		require.ErrorIs(t, err, workflow.ErrRecordVersionConflict)
+
+		current, err := store.Lookup(ctx, expected.RunID)
+		require.NoError(t, err)
+		require.Equal(t, int(statusMiddle), current.Status)
+		require.Equal(t, latest.Meta.Version, current.Meta.Version)
+
+		// Rejected writes must not emit outbox events.
+		events, err := store.ListOutboxEvents(ctx, expected.WorkflowName, 1000)
+		require.NoError(t, err)
+		require.Equal(t, 2, len(events))
 	})
 }
 

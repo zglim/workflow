@@ -60,7 +60,17 @@ func newUpdater[Type any, Status StatusType](
 		// Ensure that the record still has the intended status. If not then another consumer will be processing this
 		// record.
 		if latest.Meta.Version != workingVersion {
-			return fmt.Errorf("record was modified since it was loaded: run_id=%s, expected_version=%d, actual_version=%d", latest.RunID, workingVersion, latest.Meta.Version)
+			return fmt.Errorf("record was modified since it was loaded: run_id=%s, expected_version=%d, actual_version=%d: %w", latest.RunID, workingVersion, latest.Meta.Version, ErrRecordVersionConflict)
+		}
+
+		// All RunState changes must pass through the legal transition table in runstate.go. A change
+		// only occurs when the record's current RunState differs from the target - e.g. Initiated to
+		// Running or Running to Completed.
+		if record.RunState.Valid() && record.RunState != runState {
+			valid, ok := runStateTransitions[record.RunState]
+			if !ok || !valid[runState] {
+				return fmt.Errorf("invalid RunState: from %s | to %s", record.RunState, runState)
+			}
 		}
 
 		// Save and repeat skips transition validation and keeps the current status.

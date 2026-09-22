@@ -210,7 +210,24 @@ func stepConsumer[Type any, Status StatusType](
 			return nil
 		}
 
-		return updater(ctx, Status(record.Status), next, run, record.Meta.Version)
+		err = updater(ctx, Status(record.Status), next, run, record.Meta.Version)
+		if errors.Is(err, ErrRecordVersionConflict) {
+			// The record was modified concurrently (e.g. paused or advanced by another process)
+			// after it was loaded. The winning write emitted its own event, so this event is
+			// stale and can be skipped.
+			logger.Debug(ctx, "skipping update of concurrently modified workflow record", map[string]string{
+				"event_id":       strconv.FormatInt(e.ID, 10),
+				"workflow":       workflowName,
+				"run_id":         record.RunID,
+				"foreign_id":     record.ForeignID,
+				"process_name":   processName,
+				"current_status": strconv.FormatInt(int64(record.Status), 10),
+			})
+			metrics.ProcessSkippedEvents.WithLabelValues(workflowName, processName, "record version conflict").Inc()
+			return nil
+		}
+
+		return err
 	}
 }
 

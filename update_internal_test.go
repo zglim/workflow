@@ -115,7 +115,7 @@ func TestUpdater(t *testing.T) {
 				}, nil
 			},
 			current:     statusMiddle,
-			expectedErr: fmt.Errorf("record was modified since it was loaded: run_id=, expected_version=0, actual_version=1"),
+			expectedErr: fmt.Errorf("record was modified since it was loaded: run_id=, expected_version=0, actual_version=1: %w", ErrRecordVersionConflict),
 		},
 		{
 			name: "No valid transition available",

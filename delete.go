@@ -31,7 +31,7 @@ func deleteConsumer[Type any, Status StatusType](w *Workflow[Type, Status]) {
 			processName,
 			stream,
 			runDelete(
-				w.recordStore.Store,
+				casStore(w.recordStore),
 				w.recordStore.Lookup,
 				w.customDelete,
 			),

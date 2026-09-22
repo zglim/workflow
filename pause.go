@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"k8s.io/utils/clock"
@@ -84,7 +85,7 @@ func pausedRecordsRetryConsumer[Type any, Status StatusType](w *Workflow[Type, S
 			stream,
 			autoRetryConsumer(
 				w.recordStore.Lookup,
-				w.recordStore.Store,
+				casStore(w.recordStore),
 				w.clock,
 				w.pausedRecordsRetry.resumeAfter,
 			),
@@ -119,6 +120,12 @@ func autoRetryConsumer(
 
 		controller := NewRunStateController(store, record)
 		err = controller.Resume(ctx)
+		if errors.Is(err, ErrOptimisticLock) {
+			// The record changed after this event was loaded (e.g. a manual Resume or
+			// Cancel). Drop the stale attempt: the persisted state already reflects the
+			// newer action and the corresponding resume/cancel event supersedes this one.
+			return nil
+		}
 		if err != nil {
 			return err
 		}

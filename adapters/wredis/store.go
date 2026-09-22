@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/luno/workflow"
@@ -85,7 +86,91 @@ var (
 
 		return 0
 	`)
+
+	storeWithVersionScript = redis.NewScript(`
+		local record_key = KEYS[1]
+		local index_key = KEYS[2]
+		local list_key = KEYS[3]
+		local global_list_key = KEYS[4]
+		local outbox_key = KEYS[5]
+		local reverse_index_key = KEYS[6]
+
+		local record_data = ARGV[1]
+		local run_id = ARGV[2]
+		local score = ARGV[3]
+		local outbox_data = ARGV[4]
+		local outbox_event_id = ARGV[5]
+		local expected_version = tonumber(ARGV[6])
+
+		local existing = redis.call('GET', record_key)
+		if existing then
+			local current = cjson.decode(existing)
+			local current_version = 0
+			if current.Meta and current.Meta.Version then
+				current_version = tonumber(current.Meta.Version)
+			end
+			if current_version ~= expected_version then
+				return redis.error_reply('workflow: optimistic lock conflict')
+			end
+		elseif expected_version ~= 0 then
+			return redis.error_reply('workflow: optimistic lock conflict')
+		end
+
+		redis.call('SET', record_key, record_data)
+		redis.call('SET', index_key, run_id)
+		redis.call('ZADD', list_key, score, run_id)
+		redis.call('ZADD', global_list_key, score, run_id)
+		redis.call('LPUSH', outbox_key, outbox_data)
+		redis.call('SET', reverse_index_key, outbox_key)
+
+		return 'OK'
+	`)
 )
+
+// StoreWithVersion commits the record only if it is absent (expectedVersion 0) or the
+// stored record is still at expectedVersion. A version mismatch returns
+// workflow.ErrOptimisticLock.
+func (s *Store) StoreWithVersion(ctx context.Context, record *workflow.Record, expectedVersion uint) error {
+	eventData, err := workflow.MakeOutboxEventData(*record)
+	if err != nil {
+		return err
+	}
+
+	outboxEvent := &workflow.OutboxEvent{
+		ID:           eventData.ID,
+		WorkflowName: eventData.WorkflowName,
+		Data:         eventData.Data,
+		CreatedAt:    time.Now(),
+	}
+
+	recordData, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	outboxData, err := json.Marshal(outboxEvent)
+	if err != nil {
+		return err
+	}
+
+	recordKey := recordKeyPrefix + record.RunID
+	indexKey := indexKeyPrefix + record.WorkflowName + ":" + record.ForeignID
+	listKey := "workflow:list:" + record.WorkflowName
+	globalListKey := "workflow:list:all"
+	outboxKey := outboxKeyPrefix + record.WorkflowName
+	reverseIndexKey := outboxReverseKeyPrefix + eventData.ID
+
+	score := strconv.FormatFloat(float64(record.CreatedAt.Unix()), 'f', -1, 64)
+
+	err = storeWithVersionScript.Run(ctx, s.client,
+		[]string{recordKey, indexKey, listKey, globalListKey, outboxKey, reverseIndexKey},
+		string(recordData), record.RunID, score, string(outboxData), eventData.ID, expectedVersion).Err()
+	if err != nil && strings.Contains(err.Error(), "optimistic lock conflict") {
+		return workflow.ErrOptimisticLock
+	}
+
+	return err
+}
 
 // Store implements the RecordStore interface with outbox pattern
 func (s *Store) Store(ctx context.Context, record *workflow.Record) error {

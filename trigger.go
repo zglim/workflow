@@ -16,7 +16,7 @@ func (w *Workflow[Type, Status]) Trigger(
 	foreignID string,
 	opts ...TriggerOption[Type, Status],
 ) (runID string, err error) {
-	return trigger(ctx, w, w.recordStore.Latest, w.recordStore.Store, foreignID, opts...)
+	return trigger(ctx, w, w.recordStore.Latest, casStore(w.recordStore), foreignID, opts...)
 }
 
 func trigger[Type any, Status StatusType](

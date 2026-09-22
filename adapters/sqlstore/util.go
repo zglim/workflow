@@ -80,6 +80,81 @@ func (s *SQLStore) update(
 	return nil
 }
 
+// StoreWithVersion commits the record optimistically: the update only succeeds when the
+// persisted record is still at expectedVersion. The version check, record write and outbox
+// insert happen in one transaction. It returns workflow.ErrOptimisticLock if another commit
+// advanced the version concurrently.
+func (s *SQLStore) StoreWithVersion(
+	ctx context.Context,
+	r *workflow.Record,
+	expectedVersion uint,
+) error {
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if expectedVersion == 0 {
+		existing, err := recordScan(tx.QueryRowContext(ctx, s.recordSelectPrefix+"run_id=?", r.RunID))
+		if errors.Is(err, workflow.ErrRecordNotFound) {
+			if err := s.create(ctx, tx, r.WorkflowName, r.ForeignID, r.RunID, r.Status, r.Object, int(r.RunState), r.Meta); err != nil {
+				return err
+			}
+		} else {
+			if err != nil {
+				return err
+			}
+
+			if existing.Meta.Version != 0 {
+				return workflow.ErrOptimisticLock
+			}
+
+			if err := s.update(ctx, tx, r.RunID, r.Status, r.Object, int(r.RunState), r.Meta); err != nil {
+				return err
+			}
+		}
+	} else {
+		res, err := tx.ExecContext(ctx,
+			"update "+s.recordTableName+" set run_state=?, status=?, object=?, updated_at=now(), meta=? "+
+				"where run_id=? and (meta is null or cast(json_unquote(json_extract(meta, '$.Version')) as unsigned)=?)",
+			int(r.RunState), r.Status, r.Object, mustMarshalMeta(r.Meta), r.RunID, expectedVersion,
+		)
+		if err != nil {
+			return errors.Wrap(err, "failed to update entry", j.MKV{"runID": r.RunID})
+		}
+
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+
+		if affected == 0 {
+			return workflow.ErrOptimisticLock
+		}
+	}
+
+	eventData, err := workflow.MakeOutboxEventData(*r)
+	if err != nil {
+		return err
+	}
+
+	if _, err := s.insertOutboxEvent(ctx, tx, eventData.ID, eventData.WorkflowName, eventData.Data); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func mustMarshalMeta(meta workflow.Meta) []byte {
+	b, err := json.Marshal(meta)
+	if err != nil {
+		panic(err)
+	}
+
+	return b
+}
+
 func (s *SQLStore) insertOutboxEvent(
 	ctx context.Context,
 	tx *sql.Tx,

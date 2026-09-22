@@ -74,7 +74,7 @@ func consumeStepEvents[Type any, Status StatusType](
 		}
 		defer stream.Close()
 
-		updater := newUpdater[Type, Status](w.recordStore.Lookup, w.recordStore.Store, w.statusGraph, w.clock)
+		updater := newUpdater[Type, Status](w.recordStore.Lookup, casStore(w.recordStore), w.statusGraph, w.clock)
 		return consume(
 			ctx,
 			w.Name(),
@@ -86,7 +86,7 @@ func consumeStepEvents[Type any, Status StatusType](
 				p.consumer,
 				currentStatus,
 				w.recordStore.Lookup,
-				w.recordStore.Store,
+				casStore(w.recordStore),
 				w.logger,
 				updater,
 				pauseAfterErrCount,
@@ -210,7 +210,24 @@ func stepConsumer[Type any, Status StatusType](
 			return nil
 		}
 
-		return updater(ctx, Status(record.Status), next, run, record.Meta.Version)
+		err = updater(ctx, Status(record.Status), next, run, record.Meta.Version)
+		if errors.Is(err, ErrOptimisticLock) {
+			// Lost the race with a concurrent state change (Pause/Resume/another
+			// consumer). The persisted record and its newer event win; drop this stale
+			// processing attempt instead of erroring (which would back off and retry a
+			// write that can never succeed at this version).
+			logger.Debug(ctx, "Skipping event due to concurrent record update", map[string]string{
+				"event_id":     strconv.FormatInt(e.ID, 10),
+				"workflow":     record.WorkflowName,
+				"run_id":       record.RunID,
+				"foreign_id":   record.ForeignID,
+				"process_name": processName,
+			})
+			metrics.ProcessSkippedEvents.WithLabelValues(workflowName, processName, "optimistic lock conflict").Inc()
+			return nil
+		}
+
+		return err
 	}
 }
 

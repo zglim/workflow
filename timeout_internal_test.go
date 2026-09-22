@@ -197,7 +197,11 @@ func TestProcessTimeout(t *testing.T) {
 				Status:       tc.record.Status,
 			}
 
-			err := processTimeout(ctx, w, timeout, tc.record, tr, tc.caller(calls).completeFunc, tc.caller(calls).store, tc.caller(calls).updater, processName, 1)
+			lookup := func(ctx context.Context, runID string) (*Record, error) {
+				return tc.record, nil
+			}
+
+			err := processTimeout(ctx, w, timeout, tc.record, tr, tc.caller(calls).completeFunc, lookup, tc.caller(calls).store, tc.caller(calls).updater, processName, 1)
 			require.NoError(t, err)
 
 			require.Equal(t, tc.expectedCalls, calls)

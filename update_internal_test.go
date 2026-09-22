@@ -28,7 +28,8 @@ func TestUpdater(t *testing.T) {
 			name: "Golden path",
 			lookup: func(context.Context, string) (*Record, error) {
 				return &Record{
-					Status: int(statusStart),
+					Status:   int(statusStart),
+					RunState: RunStateRunning,
 				}, nil
 			},
 			current: statusStart,
@@ -57,7 +58,8 @@ func TestUpdater(t *testing.T) {
 			name: "No transitions - error",
 			lookup: func(context.Context, string) (*Record, error) {
 				return &Record{
-					Status: int(statusStart),
+					Status:   int(statusStart),
+					RunState: RunStateRunning,
 				}, nil
 			},
 			current: statusStart,
@@ -77,7 +79,8 @@ func TestUpdater(t *testing.T) {
 			name: "Mark as completed",
 			lookup: func(context.Context, string) (*Record, error) {
 				return &Record{
-					Status: int(statusStart),
+					Status:   int(statusStart),
+					RunState: RunStateRunning,
 				}, nil
 			},
 			current: statusStart,
@@ -121,7 +124,8 @@ func TestUpdater(t *testing.T) {
 			name: "No valid transition available",
 			lookup: func(context.Context, string) (*Record, error) {
 				return &Record{
-					Status: int(statusStart),
+					Status:   int(statusStart),
+					RunState: RunStateRunning,
 				}, nil
 			},
 			current: statusStart,
@@ -160,6 +164,9 @@ func TestUpdater(t *testing.T) {
 			updater := newUpdater[string, testStatus](tc.lookup, store, g, c)
 			err := updater(ctx, tc.current, tc.update.Status, &tc.update, 0)
 			if err != nil {
+				if tc.expectedErr == nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
 				require.EqualError(t, err, tc.expectedErr.Error())
 			}
 		})

@@ -118,15 +118,27 @@ func (rsc *runStateControllerImpl) DeleteData(ctx context.Context, reason string
 }
 
 func (rsc *runStateControllerImpl) update(ctx context.Context, rs RunState, reason string) error {
-	valid, ok := runStateTransitions[rsc.record.RunState]
-	if !ok || !valid[rs] {
-		return fmt.Errorf("invalid RunState: from %s | to %s", rsc.record.RunState, rs)
+	if !ValidRunStateTransition(rsc.record.RunState, rs) {
+		return fmt.Errorf("%w: from %s | to %s", ErrInvalidTransition, rsc.record.RunState, rs)
 	}
 
 	previousRunState := rsc.record.RunState
 	rsc.record.RunState = rs
 	rsc.record.Meta.RunStateReason = reason
 	return updateRecord(ctx, rsc.store, rsc.record, previousRunState, rsc.record.Meta.StatusDescription)
+}
+
+// ValidRunStateTransition reports whether moving from one RunState to another is permitted
+// by the workflow run state machine defined in runstate.md. Every persisted RunState change
+// must be validated against this table; no component may write a RunState directly to the
+// RecordStore without going through it.
+func ValidRunStateTransition(from, to RunState) bool {
+	valid, ok := runStateTransitions[from]
+	if !ok {
+		return false
+	}
+
+	return valid[to]
 }
 
 var runStateTransitions = map[RunState]map[RunState]bool{

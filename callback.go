@@ -3,6 +3,7 @@ package workflow
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 )
 
@@ -18,7 +19,7 @@ func (w *Workflow[Type, Status]) Callback(
 	status Status,
 	payload io.Reader,
 ) error {
-	updateFn := newUpdater[Type, Status](w.recordStore.Lookup, w.recordStore.Store, w.statusGraph, w.clock)
+	updateFn := newUpdater[Type, Status](w.recordStore.Lookup, casStore(w.recordStore), w.statusGraph, w.clock)
 
 	for _, s := range w.callback[status] {
 		err := processCallback(
@@ -29,7 +30,7 @@ func (w *Workflow[Type, Status]) Callback(
 			foreignID,
 			payload,
 			w.recordStore.Latest,
-			w.recordStore.Store,
+			casStore(w.recordStore),
 			updateFn,
 		)
 		if err != nil {
@@ -100,5 +101,12 @@ func processCallback[Type any, Status StatusType](
 		return nil
 	}
 
-	return updater(ctx, currentStatus, next, run, wr.Meta.Version)
+	err = updater(ctx, currentStatus, next, run, wr.Meta.Version)
+	if errors.Is(err, ErrOptimisticLock) {
+		// Concurrent Pause/Resume/consumer committed a newer version. Drop the stale
+		// callback processing attempt; the record is processed from its persisted state.
+		return nil
+	}
+
+	return err
 }

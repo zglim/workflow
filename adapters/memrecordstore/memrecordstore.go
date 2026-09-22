@@ -135,7 +135,30 @@ func (s *Store) Store(ctx context.Context, record *workflow.Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Add record to store
+	return s.storeLocked(record)
+}
+
+// StoreWithVersion commits the record only if it does not yet exist (expectedVersion 0)
+// or the stored record is still at expectedVersion. It returns
+// workflow.ErrOptimisticLock when the stored version advanced concurrently.
+func (s *Store) StoreWithVersion(ctx context.Context, record *workflow.Record, expectedVersion uint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, existed := s.store[record.RunID]
+	if existed && existing.Meta.Version != expectedVersion {
+		return workflow.ErrOptimisticLock
+	}
+
+	if !existed && expectedVersion != 0 {
+		return workflow.ErrOptimisticLock
+	}
+
+	return s.storeLocked(record)
+}
+
+// storeLocked persists a record and its outbox event. The caller must hold s.mu.
+func (s *Store) storeLocked(record *workflow.Record) error {
 	uk := uniqueKey(record.WorkflowName, record.ForeignID)
 	s.keyIndex[uk] = record
 
@@ -144,8 +167,7 @@ func (s *Store) Store(ctx context.Context, record *workflow.Record) error {
 		return err
 	}
 
-	_, previouslyExisted := s.store[record.RunID]
-	if !previouslyExisted {
+	if _, previouslyExisted := s.store[record.RunID]; !previouslyExisted {
 		s.order = append(s.order, record.RunID)
 	}
 	s.store[record.RunID] = record

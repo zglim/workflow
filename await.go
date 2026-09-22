@@ -101,7 +101,7 @@ func awaitWorkflowStatusByForeignID[Type any, Status StatusType](
 				Status: Status(r.Status),
 				Object: &t,
 			},
-			controller: NewRunStateController(w.recordStore.Store, r),
+			controller: NewRunStateController(casStore(w.recordStore), r),
 		}, ack()
 	}
 }

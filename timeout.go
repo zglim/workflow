@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -30,8 +31,8 @@ func pollTimeouts[Type any, Status StatusType](
 	pollingFrequency time.Duration,
 	pauseAfterErrCount int,
 ) error {
-	updateFn := newUpdater[Type, Status](w.recordStore.Lookup, w.recordStore.Store, w.statusGraph, w.clock)
-	store := w.recordStore.Store
+	updateFn := newUpdater[Type, Status](w.recordStore.Lookup, casStore(w.recordStore), w.statusGraph, w.clock)
+	store := casStore(w.recordStore)
 
 	for {
 		if ctx.Err() != nil {
@@ -83,11 +84,41 @@ func pollTimeouts[Type any, Status StatusType](
 					r,
 					expiredTimeout,
 					w.timeoutStore.Complete,
+					w.recordStore.Lookup,
 					store,
 					updateFn,
 					processName,
 					pauseAfterErrCount,
 				)
+				if errors.Is(err, ErrOptimisticLock) {
+					// The record changed between the snapshot read above and the
+					// commit (e.g. Pause or Resume raced this poll tick). Reload the
+					// record and arbitrate instead of returning the error for retry.
+					latest, lookupErr := w.recordStore.Latest(ctx, expiredTimeout.WorkflowName, expiredTimeout.ForeignID)
+					if lookupErr != nil {
+						return lookupErr
+					}
+
+					if latest.Status != int(status) || latest.RunState.Finished() {
+						// Record moved on (or finished): the timeout is stale.
+						if cancelErr := w.timeoutStore.Cancel(ctx, expiredTimeout.ID); cancelErr != nil {
+							return cancelErr
+						}
+					}
+
+					w.logger.Debug(ctx, "Skipping timeout processing due to concurrent record update", map[string]string{
+						"workflow":     latest.WorkflowName,
+						"run_id":       latest.RunID,
+						"foreign_id":   latest.ForeignID,
+						"process_name": processName,
+						"run_state":    latest.RunState.String(),
+					})
+
+					// If the record is merely paused the timeout remains valid. Timeout
+					// deadlines keep advancing while a record is paused (wall-clock
+					// semantics), so an already-expired timeout fires once on resume.
+					continue
+				}
 				if err != nil {
 					metrics.ProcessLatency.WithLabelValues(w.Name(), processName).Observe(w.clock.Since(t0).Seconds())
 					return err
@@ -113,6 +144,7 @@ func processTimeout[Type any, Status StatusType](
 	record *Record,
 	timeout TimeoutRecord,
 	completeFn completeFunc,
+	lookup lookupFunc,
 	store storeFunc,
 	updater updater[Type, Status],
 	processName string,
@@ -125,6 +157,19 @@ func processTimeout[Type any, Status StatusType](
 
 	// Ensure the run is returned to the pool when we're done
 	defer w.releaseRun(run)
+
+	// Revalidate immediately before running the timeout logic. The snapshot was read by
+	// the poller before this call and the record may have been paused or moved on since.
+	latest, err := lookup(ctx, record.RunID)
+	if err != nil {
+		return err
+	}
+
+	if latest.Status != record.Status || latest.Meta.Version != record.Meta.Version ||
+		latest.RunState.Finished() || latest.RunState.Stopped() {
+		// Stale snapshot: let pollTimeouts arbitrate against the current record.
+		return ErrOptimisticLock
+	}
 
 	next, err := config.TimeoutFunc(ctx, run, w.clock.Now())
 	if err != nil {
@@ -273,7 +318,7 @@ func timeoutAutoInserterConsumer[Type any, Status StatusType](
 		}
 		defer stream.Close()
 
-		updater := newUpdater[Type, Status](w.recordStore.Lookup, w.recordStore.Store, w.statusGraph, w.clock)
+		updater := newUpdater[Type, Status](w.recordStore.Lookup, casStore(w.recordStore), w.statusGraph, w.clock)
 		return consume(
 			ctx,
 			w.Name(),
@@ -285,7 +330,7 @@ func timeoutAutoInserterConsumer[Type any, Status StatusType](
 				consumerFunc,
 				status,
 				w.recordStore.Lookup,
-				w.recordStore.Store,
+				casStore(w.recordStore),
 				w.logger,
 				updater,
 				pauseAfterErrCount,

@@ -54,6 +54,19 @@ Every Run progresses through a finite state machine:
 | **DataDeleted** | 6 | Data has been scrubbed/deleted |
 | **RequestedDataDeleted** | 7 | Data deletion requested (e.g., for GDPR) |
 
+Every RunState change is validated against the legal transition table in
+`runstate.go` (`ValidRunStateTransition`). The engine never writes a RunState directly
+to the RecordStore; Pause, Resume, Cancel and the processing paths all commit through
+the same version-checked store function. A commit whose record version no longer
+matches the persisted version fails with `ErrOptimisticLock`, which guarantees that a
+stale worker (for example one that loaded the record before a Pause) can never
+overwrite the Pause/Resume or regress the status.
+
+When a record is resumed, processing restarts from the persisted status: completed
+stages are not re-executed and the status never rolls back. Timeout deadlines are not
+paused — they keep advancing in wall-clock time; an expired timeout fires once after
+resume rather than being deferred or reset (see [timeouts.md](timeouts.md)).
+
 ```mermaid
 stateDiagram-v2
     direction LR

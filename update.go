@@ -57,6 +57,15 @@ func newUpdater[Type any, Status StatusType](
 			return fmt.Errorf("cannot update record as it is already finished: run_id=%s, run_state=%s", latest.RunID, latest.RunState.String())
 		}
 
+		// A business status transition may only overwrite a live, processable record.
+		// If the run was paused (or otherwise stopped) after this update loaded its
+		// working snapshot, abandon the stale write. The resume event re-delivers the
+		// record for processing from its persisted position. This is reported as an
+		// optimistic-lock conflict so callers handle it identically to a version clash.
+		if latest.RunState.Stopped() && latest.RunState.Valid() {
+			return fmt.Errorf("%w: record is %s: run_id=%s", ErrOptimisticLock, latest.RunState.String(), latest.RunID)
+		}
+
 		// Ensure that the record still has the intended status. If not then another consumer will be processing this
 		// record.
 		if latest.Meta.Version != workingVersion {
@@ -66,7 +75,7 @@ func newUpdater[Type any, Status StatusType](
 		// Save and repeat skips transition validation and keeps the current status.
 		if isSaveAndRepeat(next) {
 			updatedRecord.Status = int(current)
-			return updateRecord(ctx, store, updatedRecord, record.RunState, current.String())
+			return storeBusinessUpdate(ctx, store, updatedRecord, current.String())
 		}
 
 		err = validateTransition(current, next, graph)
@@ -74,8 +83,24 @@ func newUpdater[Type any, Status StatusType](
 			return err
 		}
 
-		return updateRecord(ctx, store, updatedRecord, record.RunState, next.String())
+		return storeBusinessUpdate(ctx, store, updatedRecord, next.String())
 	}
+}
+
+// storeBusinessUpdate commits a status update. The run's lifecycle state only changes
+// when a terminal status is reached (Running -> Completed); every other business status
+// update keeps the run Running, which is not a run state transition and therefore must
+// not be passed through ValidRunStateTransition.
+func storeBusinessUpdate(ctx context.Context, store storeFunc, record *Record, statusDescription string) error {
+	if record.RunState == RunStateRunning {
+		record.Meta.StatusDescription = statusDescription
+		record.Meta.Version++
+		metrics.RunStateChanges.WithLabelValues(record.WorkflowName, RunStateRunning.String(), RunStateRunning.String()).Inc()
+
+		return store(ctx, record)
+	}
+
+	return updateRecord(ctx, store, record, RunStateRunning, statusDescription)
 }
 
 func validateTransition[Status StatusType](current, next Status, graph *graph.Graph) error {
@@ -106,6 +131,12 @@ func updateRecord(
 	previousRunState RunState,
 	statusDescription string,
 ) error {
+	// Every RunState change must be legal per the run state machine. RunStateUnknown is
+	// reserved for the initial Trigger insert which creates the record in RunStateInitiated.
+	if previousRunState != RunStateUnknown && !ValidRunStateTransition(previousRunState, record.RunState) {
+		return fmt.Errorf("%w: from %s | to %s", ErrInvalidTransition, previousRunState, record.RunState)
+	}
+
 	// Push run state changes for observability
 	metrics.RunStateChanges.WithLabelValues(record.WorkflowName, previousRunState.String(), record.RunState.String()).
 		Inc()

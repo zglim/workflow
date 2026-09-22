@@ -35,7 +35,7 @@ func Update(store workflow.RecordStore) http.HandlerFunc {
 			return
 		}
 
-		ctr := workflow.NewRunStateController(store.Store, wr)
+		ctr := workflow.NewRunStateController(workflow.NewOptimisticStoreFunc(store), wr)
 		if err != nil {
 			http.Error(w, "failed to build controller for record", http.StatusInternalServerError)
 			return

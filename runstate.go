@@ -133,6 +133,9 @@ var runStateTransitions = map[RunState]map[RunState]bool{
 	RunStateInitiated: {
 		RunStateRunning: true,
 		RunStatePaused:  true,
+		// Initiated runs can be cancelled without ever being consumed. This is required so that a record
+		// level deadline can terminate a run that has not been picked up by a consumer yet.
+		RunStateCancelled: true,
 	},
 	RunStateRunning: {
 		RunStateCompleted: true,

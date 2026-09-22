@@ -70,5 +70,6 @@ func TestInternalState(t *testing.T) {
 		"outbox-consumer":                                           workflow.StateShutdown,
 		"delete-consumer":                                           workflow.StateShutdown,
 		"paused-records-retry-consumer":                             workflow.StateShutdown,
+		"deadline-poller":                                           workflow.StateShutdown,
 	}, wf.States())
 }

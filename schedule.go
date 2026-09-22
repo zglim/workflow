@@ -67,6 +67,10 @@ func (w *Workflow[Type, Status]) Schedule(
 			tOpts = append(tOpts, WithInitialValue[Type, Status](options.initialValue))
 		}
 
+		if !options.deadline.IsZero() {
+			tOpts = append(tOpts, WithDeadline[Type, Status](options.deadline))
+		}
+
 		// If a filter has been provided then allow the ability to skip scheduling when false is returned along with
 		// a nil error.
 		var shouldTrigger bool
@@ -122,6 +126,7 @@ func waitUntil(ctx context.Context, clock clock.Clock, until time.Time) error {
 type scheduleOpts[Type any, Status StatusType] struct {
 	initialValue   *Type
 	scheduleFilter func(ctx context.Context) (bool, error)
+	deadline       time.Time
 }
 
 type ScheduleOption[Type any, Status StatusType] func(o *scheduleOpts[Type, Status])
@@ -137,5 +142,13 @@ func WithScheduleFilter[Type any, Status StatusType](
 ) ScheduleOption[Type, Status] {
 	return func(o *scheduleOpts[Type, Status]) {
 		o.scheduleFilter = fn
+	}
+}
+
+// WithScheduleDeadline sets the absolute record level deadline for each run that the schedule triggers.
+// See WithDeadline for deadline semantics.
+func WithScheduleDeadline[Type any, Status StatusType](deadline time.Time) ScheduleOption[Type, Status] {
+	return func(o *scheduleOpts[Type, Status]) {
+		o.deadline = deadline
 	}
 }

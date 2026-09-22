@@ -141,10 +141,10 @@ func TestRunStateControllerTransitions(t *testing.T) {
 			valid: false,
 		},
 		{
-			name:  "Initiated to Cancelled [invalid]",
+			name:  "Initiated to Cancelled [valid]",
 			from:  RunStateInitiated,
 			to:    RunStateCancelled,
-			valid: false,
+			valid: true,
 		},
 		{
 			name:  "Initiated to Completed [invalid]",

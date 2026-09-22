@@ -113,7 +113,7 @@ func (w *Workflow[Type, Status]) Run(ctx context.Context) {
 	// Ensure that the background consumers are only initialized once
 	w.once.Do(func() {
 		ctx, cancel := context.WithCancel(ctx)
-		
+
 		func() {
 			w.mu.Lock()
 			defer w.mu.Unlock()
@@ -162,6 +162,13 @@ func (w *Workflow[Type, Status]) Run(ctx context.Context) {
 					timeoutAutoInserterConsumer(w, status, timeouts)
 				})
 			}
+
+			// The record level deadline poller reuses the same TimeoutStore and polling pattern as the
+			// per-stage timeouts rather than running a separate polling line. It must run even when no
+			// per-stage timeouts are configured.
+			track(w, func() {
+				deadlinePoller(w)
+			})
 		}
 
 		// Start the connected stream consumers
@@ -324,7 +331,7 @@ func (w *Workflow[Type, Status]) Stop() {
 	w.mu.Lock()
 	cancel := w.cancel
 	w.mu.Unlock()
-	
+
 	if cancel == nil {
 		return
 	}

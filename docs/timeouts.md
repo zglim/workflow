@@ -386,3 +386,28 @@ Monitor timeout processing with metrics:
 2. **No Sub-second Precision**: Minimum polling frequency is typically 1 second
 3. **Clock Dependency**: Relies on system clock for accurate timing
 4. **Storage Growth**: Long-running timeouts accumulate in storage
+
+## Record Level Deadlines
+
+Per-stage timeouts (configured via `AddTimeout`) only apply while the record is in a single stage and run a user defined `TimeoutFunc`. A **deadline** is an absolute time that covers the entire lifecycle of a run: when it elapses the record is moved to the `Cancelled` terminal state regardless of the stage it is currently at, including when it is paused or has not yet been consumed.
+
+Both mechanisms are independent and share the same `TimeoutStore` and polling machinery. When both are configured the earliest one to elapses takes effect: a per-stage timeout may move the record onward while the deadline is still in the future, and the deadline may cancel a run that is waiting on a long stage timeout. Deadline driven cancellations are distinguishable from manual and other cancellations through the run state reason `workflow.DeadlineExceededReason`.
+
+Set a deadline when triggering a run using the `WithDeadline` option (a workflow must be built with a `TimeoutStore`):
+
+```go
+runID, err := wf.Trigger(ctx, foreignID,
+    workflow.WithDeadline[Order, Status](time.Now().Add(24*time.Hour)),
+)
+```
+
+Scheduled runs can carry the same option via `WithScheduleDeadline`. The deadline is persisted on the record (`Meta.Deadline`); records without a deadline behave exactly as before.
+
+When awaiting a run that is cancelled by its deadline, `Await` returns the distinct sentinel error `workflow.ErrRunDeadlineExceeded` (which wraps `workflow.ErrRunCancelled`) instead of a generic cancellation error:
+
+```go
+_, err := wf.Await(ctx, foreignID, runID, StatusDelivered)
+if errors.Is(err, workflow.ErrRunDeadlineExceeded) {
+    // run terminated because its deadline elapsed
+}
+```

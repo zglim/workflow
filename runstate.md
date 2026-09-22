@@ -7,6 +7,8 @@ stateDiagram-v2
 
     Initiated-->Running
 
+    Initiated --> Cancelled: record deadline
+
     Running-->Completed
     Running-->Paused
 

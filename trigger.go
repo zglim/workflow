@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -74,9 +75,17 @@ func trigger[Type any, Status StatusType](
 		return "", ErrWorkflowInProgress
 	}
 
+	// A record level deadline is enforced through the same TimeoutStore and polling machinery as per-stage
+	// timeouts. It is an explicit configuration error to set a deadline without a TimeoutStore as the
+	// deadline would otherwise never fire.
+	if !o.deadline.IsZero() && w.timeoutStore == nil {
+		return "", fmt.Errorf("trigger failed: record level deadline requires a TimeoutStore to be configured for workflow: %s", w.Name())
+	}
+
 	meta := Meta{
 		StatusDescription: util.CamelCaseToSpacing(startingStatus.String()),
 		TraceOrigin:       stack.Trace(),
+		Deadline:          o.deadline,
 	}
 
 	uid, err := uuid.NewRandom()
@@ -102,12 +111,23 @@ func trigger[Type any, Status StatusType](
 		return "", err
 	}
 
+	if !o.deadline.IsZero() {
+		// Register the record level deadline with the timeout store. The single deadline row is valid for
+		// the entire lifecycle of the run: it is not tied to a stage and is consumed by the workflow wide
+		// deadline poller rather than the per-stage timeout consumers.
+		err = w.timeoutStore.Create(ctx, w.Name(), foreignID, runID, deadlineTimeoutStatus, o.deadline)
+		if err != nil {
+			return "", err
+		}
+	}
+
 	return runID, nil
 }
 
 type triggerOpts[Type any, Status StatusType] struct {
 	startingPoint Status
 	initialValue  *Type
+	deadline      time.Time
 }
 
 type TriggerOption[Type any, Status StatusType] func(o *triggerOpts[Type, Status])
@@ -121,5 +141,17 @@ func WithStartingPoint[Type any, Status StatusType](startingStatus Status) Trigg
 func WithInitialValue[Type any, Status StatusType](t *Type) TriggerOption[Type, Status] {
 	return func(o *triggerOpts[Type, Status]) {
 		o.initialValue = t
+	}
+}
+
+// WithDeadline sets the absolute record level deadline for the triggered run. When the deadline elapses the
+// record is transitioned to RunStateCancelled with RunStateReason set to DeadlineExceededReason regardless of
+// the status it is currently at, including when it is paused or has not yet been consumed. A deadline covers
+// the entire lifecycle of the run and is independent of any per-stage timeouts; when both are configured the
+// earliest one to elapse takes effect. Using WithDeadline requires the workflow to be built with a
+// TimeoutStore.
+func WithDeadline[Type any, Status StatusType](deadline time.Time) TriggerOption[Type, Status] {
+	return func(o *triggerOpts[Type, Status]) {
+		o.deadline = deadline
 	}
 }

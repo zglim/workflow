@@ -674,6 +674,7 @@ func TestExpectedProcesses(t *testing.T) {
 		"completed-run-state-change-hook-consumer":    true,
 		"delete-consumer":                             true,
 		"paused-records-retry-consumer":               true,
+		"deadline-poller":                             true,
 	}
 
 	w := acceptanceTestWorkflow().Build(
@@ -712,6 +713,7 @@ func TestExpectedProcesses_outboxDisabled(t *testing.T) {
 		"completed-run-state-change-hook-consumer":    true,
 		"delete-consumer":                             true,
 		"paused-records-retry-consumer":               true,
+		"deadline-poller":                             true,
 	}
 
 	w := acceptanceTestWorkflow().Build(

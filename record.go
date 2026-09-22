@@ -49,6 +49,13 @@ type Record struct {
 // particularly useful when accessing the data of the record without the ability to cast it to a TypedRecord which is
 // often the case when debugging the data via the RecordStore.
 type Meta struct {
+	// Deadline is the optional absolute time at which the entire Run must be terminated regardless of the
+	// Status the record is currently at. Unlike per-stage timeouts, a deadline covers the full lifecycle of the
+	// record: when it elapses the record is transitioned to RunStateCancelled with RunStateReason set to
+	// DeadlineExceededReason. A zero value means no deadline has been configured and the record behaves exactly
+	// as records created before the field existed (backward compatible).
+	Deadline time.Time
+
 	// RunStateReason provides a human-readable explanation for the current run state.
 	// This field helps to understand the cause behind the current state of the run, such as "Paused", "Canceled", or "Deleted".
 	// For instance, calling functions like Pause, Cancel, or DeleteData will update this field with a descriptive reason

@@ -11,7 +11,7 @@ import (
 	"github.com/luno/workflow/internal/outboxpb"
 )
 
-func outboxConsumer[Type any, Status StatusType](w *Workflow[Type, Status], config outboxConfig) {
+func outboxComponent[Type any, Status StatusType](w *Workflow[Type, Status], config outboxConfig) componentSpec {
 	role := makeRole(w.Name(), "outbox", "consumer")
 	processName := makeRole("outbox", "consumer")
 
@@ -30,19 +30,24 @@ func outboxConsumer[Type any, Status StatusType](w *Workflow[Type, Status], conf
 		lagAlert = config.lagAlert
 	}
 
-	w.run(role, processName, func(ctx context.Context) error {
-		return purgeOutbox(
-			ctx,
-			w.Name(),
-			processName,
-			w.recordStore,
-			w.eventStreamer,
-			w.clock,
-			pollingFrequency,
-			lagAlert,
-			config.limit,
-		)
-	}, errBackOff)
+	return componentSpec{
+		role:        role,
+		processName: processName,
+		errBackOff:  errBackOff,
+		process: func(ctx context.Context) error {
+			return purgeOutbox(
+				ctx,
+				w.Name(),
+				processName,
+				w.recordStore,
+				w.eventStreamer,
+				w.clock,
+				pollingFrequency,
+				lagAlert,
+				config.limit,
+			)
+		},
+	}
 }
 
 func defaultOutboxConfig() outboxConfig {

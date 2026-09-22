@@ -32,11 +32,27 @@ type connectorConfig[Type any, Status StatusType] struct {
 	lagAlert      time.Duration
 }
 
-func connectorConsumer[Type any, Status StatusType](
+// connectorComponents resolves the parallel count for the connector and
+// expands it into one component spec per shard.
+func connectorComponents[Type any, Status StatusType](
+	w *Workflow[Type, Status],
+	config *connectorConfig[Type, Status],
+) []componentSpec {
+	parallelCount := w.defaultOpts.parallelCount
+	if config.parallelCount != 0 {
+		parallelCount = config.parallelCount
+	}
+
+	return shardSpecs(parallelCount, func(shard, totalShards int) componentSpec {
+		return connectorComponent(w, config, shard, totalShards)
+	})
+}
+
+func connectorComponent[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	config *connectorConfig[Type, Status],
 	shard, totalShards int,
-) {
+) componentSpec {
 	role := makeRole(
 		config.name,
 		"connector",
@@ -66,32 +82,37 @@ func connectorConsumer[Type any, Status StatusType](
 	// processName can have the same name as the role. It is the same here due to the fact that there are no enums
 	// that can be converted to a meaningful string
 	processName := role
-	w.run(role, processName, func(ctx context.Context) error {
-		consumer, err := config.constructor.Make(ctx, role)
-		if err != nil {
-			return err
-		}
-		defer consumer.Close()
+	return componentSpec{
+		role:        role,
+		processName: processName,
+		errBackOff:  errBackOff,
+		process: func(ctx context.Context) error {
+			consumer, err := config.constructor.Make(ctx, role)
+			if err != nil {
+				return err
+			}
+			defer consumer.Close()
 
-		return consume(
-			ctx,
-			w.Name(),
-			processName,
-			newConnectorStreamer(consumer),
-			func(ctx context.Context, e *Event) error {
-				ce, err := streamerEventToConnectorEvent(e)
-				if err != nil {
-					return err
-				}
+			return consume(
+				ctx,
+				w.Name(),
+				processName,
+				newConnectorStreamer(consumer),
+				func(ctx context.Context, e *Event) error {
+					ce, err := streamerEventToConnectorEvent(e)
+					if err != nil {
+						return err
+					}
 
-				return config.connectorFn(ctx, w, ce)
-			},
-			w.clock,
-			lag,
-			lagAlert,
-			shardFilter(shard, totalShards),
-		)
-	}, errBackOff)
+					return config.connectorFn(ctx, w, ce)
+				},
+				w.clock,
+				lag,
+				lagAlert,
+				shardFilter(shard, totalShards),
+			)
+		},
+	}
 }
 
 type connectorStreamer struct {

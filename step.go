@@ -10,12 +10,29 @@ import (
 	"github.com/luno/workflow/internal/metrics"
 )
 
-func consumeStepEvents[Type any, Status StatusType](
+// stepConsumerComponents resolves the parallel count for the step and expands
+// it into one component spec per shard.
+func stepConsumerComponents[Type any, Status StatusType](
+	w *Workflow[Type, Status],
+	currentStatus Status,
+	p consumerConfig[Type, Status],
+) []componentSpec {
+	parallelCount := w.defaultOpts.parallelCount
+	if p.parallelCount != 0 {
+		parallelCount = p.parallelCount
+	}
+
+	return shardSpecs(parallelCount, func(shard, totalShards int) componentSpec {
+		return stepConsumerComponent(w, currentStatus, p, shard, totalShards)
+	})
+}
+
+func stepConsumerComponent[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	currentStatus Status,
 	p consumerConfig[Type, Status],
 	shard, totalShards int,
-) {
+) componentSpec {
 	role := makeRole(
 		w.Name(),
 		strconv.FormatInt(int64(currentStatus), 10),
@@ -62,44 +79,49 @@ func consumeStepEvents[Type any, Status StatusType](
 		lag = p.lag
 	}
 
-	w.run(role, processName, func(ctx context.Context) error {
-		stream, err := w.eventStreamer.NewReceiver(
-			ctx,
-			topic,
-			role,
-			WithReceiverPollFrequency(pollingFrequency),
-		)
-		if err != nil {
-			return err
-		}
-		defer stream.Close()
+	return componentSpec{
+		role:        role,
+		processName: processName,
+		errBackOff:  errBackOff,
+		process: func(ctx context.Context) error {
+			stream, err := w.eventStreamer.NewReceiver(
+				ctx,
+				topic,
+				role,
+				WithReceiverPollFrequency(pollingFrequency),
+			)
+			if err != nil {
+				return err
+			}
+			defer stream.Close()
 
-		updater := newUpdater[Type, Status](w.recordStore.Lookup, w.recordStore.Store, w.statusGraph, w.clock)
-		return consume(
-			ctx,
-			w.Name(),
-			processName,
-			stream,
-			stepConsumer(
+			updater := newUpdater[Type, Status](w.recordStore.Lookup, w.recordStore.Store, w.statusGraph, w.clock)
+			return consume(
+				ctx,
 				w.Name(),
 				processName,
-				p.consumer,
-				currentStatus,
-				w.recordStore.Lookup,
-				w.recordStore.Store,
-				w.logger,
-				updater,
-				pauseAfterErrCount,
-				w.errorCounter,
-				w.newRunObj(),
-				w.releaseRun,
-			),
-			w.clock,
-			lag,
-			lagAlert,
-			shardFilter(shard, totalShards),
-		)
-	}, errBackOff)
+				stream,
+				stepConsumer(
+					w.Name(),
+					processName,
+					p.consumer,
+					currentStatus,
+					w.recordStore.Lookup,
+					w.recordStore.Store,
+					w.logger,
+					updater,
+					pauseAfterErrCount,
+					w.errorCounter,
+					w.newRunObj(),
+					w.releaseRun,
+				),
+				w.clock,
+				lag,
+				lagAlert,
+				shardFilter(shard, totalShards),
+			)
+		},
+	}
 }
 
 func stepConsumer[Type any, Status StatusType](

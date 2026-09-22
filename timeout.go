@@ -175,11 +175,24 @@ type timeout[Type any, Status StatusType] struct {
 	TimeoutFunc TimeoutFunc[Type, Status]
 }
 
-func timeoutPoller[Type any, Status StatusType](
+// timeoutComponents assembles the timeout poller and the timeout auto
+// inserter components for the provided status.
+func timeoutComponents[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	status Status,
 	timeouts timeouts[Type, Status],
-) {
+) []componentSpec {
+	return []componentSpec{
+		timeoutPollerComponent(w, status, timeouts),
+		timeoutAutoInserterComponent(w, status, timeouts),
+	}
+}
+
+func timeoutPollerComponent[Type any, Status StatusType](
+	w *Workflow[Type, Status],
+	status Status,
+	timeouts timeouts[Type, Status],
+) componentSpec {
 	role := makeRole(w.Name(), strconv.FormatInt(int64(status), 10), "timeout-consumer")
 	// readableRole can change in value if the string value of the status enum is changed. It should not be used for
 	// storing in the record store, event streamer, timeout store, or offset store.
@@ -200,21 +213,26 @@ func timeoutPoller[Type any, Status StatusType](
 		pauseAfterErrCount = timeouts.pauseAfterErrCount
 	}
 
-	w.run(role, processName, func(ctx context.Context) error {
-		err := pollTimeouts(ctx, w, status, timeouts, processName, pollingFrequency, pauseAfterErrCount)
-		if err != nil {
-			return err
-		}
+	return componentSpec{
+		role:        role,
+		processName: processName,
+		errBackOff:  errBackOff,
+		process: func(ctx context.Context) error {
+			err := pollTimeouts(ctx, w, status, timeouts, processName, pollingFrequency, pauseAfterErrCount)
+			if err != nil {
+				return err
+			}
 
-		return nil
-	}, errBackOff)
+			return nil
+		},
+	}
 }
 
-func timeoutAutoInserterConsumer[Type any, Status StatusType](
+func timeoutAutoInserterComponent[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	status Status,
 	timeouts timeouts[Type, Status],
-) {
+) componentSpec {
 	role := makeRole(w.Name(), strconv.FormatInt(int64(status), 10), "timeout-auto-inserter-consumer")
 	processName := makeRole(status.String(), "timeout-auto-inserter-consumer")
 
@@ -238,66 +256,71 @@ func timeoutAutoInserterConsumer[Type any, Status StatusType](
 		lagAlert = timeouts.lagAlert
 	}
 
-	w.run(role, processName, func(ctx context.Context) error {
-		consumerFunc := func(ctx context.Context, r *Run[Type, Status]) (Status, error) {
-			for _, config := range timeouts.transitions {
-				expireAt, err := config.TimerFunc(ctx, r, w.clock.Now())
-				if err != nil {
-					return 0, err
+	return componentSpec{
+		role:        role,
+		processName: processName,
+		errBackOff:  errBackOff,
+		process: func(ctx context.Context) error {
+			consumerFunc := func(ctx context.Context, r *Run[Type, Status]) (Status, error) {
+				for _, config := range timeouts.transitions {
+					expireAt, err := config.TimerFunc(ctx, r, w.clock.Now())
+					if err != nil {
+						return 0, err
+					}
+
+					if expireAt.IsZero() {
+						// Ignore and evaluate the next
+						continue
+					}
+
+					err = w.timeoutStore.Create(ctx, r.WorkflowName, r.ForeignID, r.RunID, int(status), expireAt)
+					if err != nil {
+						return 0, err
+					}
 				}
 
-				if expireAt.IsZero() {
-					// Ignore and evaluate the next
-					continue
-				}
-
-				err = w.timeoutStore.Create(ctx, r.WorkflowName, r.ForeignID, r.RunID, int(status), expireAt)
-				if err != nil {
-					return 0, err
-				}
+				// Never update status even when successful
+				return 0, nil
 			}
 
-			// Never update status even when successful
-			return 0, nil
-		}
+			topic := Topic(w.Name(), int(status))
+			stream, err := w.eventStreamer.NewReceiver(
+				ctx,
+				topic,
+				role,
+				WithReceiverPollFrequency(pollingFrequency),
+			)
+			if err != nil {
+				return err
+			}
+			defer stream.Close()
 
-		topic := Topic(w.Name(), int(status))
-		stream, err := w.eventStreamer.NewReceiver(
-			ctx,
-			topic,
-			role,
-			WithReceiverPollFrequency(pollingFrequency),
-		)
-		if err != nil {
-			return err
-		}
-		defer stream.Close()
-
-		updater := newUpdater[Type, Status](w.recordStore.Lookup, w.recordStore.Store, w.statusGraph, w.clock)
-		return consume(
-			ctx,
-			w.Name(),
-			processName,
-			stream,
-			stepConsumer(
+			updater := newUpdater[Type, Status](w.recordStore.Lookup, w.recordStore.Store, w.statusGraph, w.clock)
+			return consume(
+				ctx,
 				w.Name(),
 				processName,
-				consumerFunc,
-				status,
-				w.recordStore.Lookup,
-				w.recordStore.Store,
-				w.logger,
-				updater,
-				pauseAfterErrCount,
-				w.errorCounter,
-				w.newRunObj(),
-				w.releaseRun,
-			),
-			w.clock,
-			0,
-			lagAlert,
-		)
-	}, errBackOff)
+				stream,
+				stepConsumer(
+					w.Name(),
+					processName,
+					consumerFunc,
+					status,
+					w.recordStore.Lookup,
+					w.recordStore.Store,
+					w.logger,
+					updater,
+					pauseAfterErrCount,
+					w.errorCounter,
+					w.newRunObj(),
+					w.releaseRun,
+				),
+				w.clock,
+				0,
+				lagAlert,
+			)
+		},
+	}
 }
 
 // TimerFunc exists to allow the specification of when the timeout should expire dynamically. If not time is set then a

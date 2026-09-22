@@ -23,23 +23,26 @@ const (
 )
 
 func NewBuilder[Type any, Status StatusType](name string) *Builder[Type, Status] {
-	return &Builder[Type, Status]{
-		workflow: &Workflow[Type, Status]{
-			name:          name,
-			clock:         clock.RealClock{},
-			consumers:     make(map[Status]consumerConfig[Type, Status]),
-			callback:      make(map[Status][]callback[Type, Status]),
-			timeouts:      make(map[Status]timeouts[Type, Status]),
-			statusGraph:   graph.New(allSkipTypes()...),
-			errorCounter:  errorcounter.New(),
-			internalState: make(map[string]State),
-			logger: &logger{
-				debugMode: false, // Explicit for readability
-				inner:     interal_logger.New(os.Stdout),
-			},
-			runStateChangeHooks: make(map[RunState]RunStateChangeHookFunc[Type, Status]),
-			runPool:             newRunPool[Type, Status](),
+	w := &Workflow[Type, Status]{
+		name:          name,
+		clock:         clock.RealClock{},
+		consumers:     make(map[Status]consumerConfig[Type, Status]),
+		callback:      make(map[Status][]callback[Type, Status]),
+		timeouts:      make(map[Status]timeouts[Type, Status]),
+		statusGraph:   graph.New(allSkipTypes()...),
+		errorCounter:  errorcounter.New(),
+		internalState: make(map[string]State),
+		logger: &logger{
+			debugMode: false, // Explicit for readability
+			inner:     interal_logger.New(os.Stdout),
 		},
+		runStateChangeHooks: make(map[RunState]RunStateChangeHookFunc[Type, Status]),
+		runPool:             newRunPool[Type, Status](),
+	}
+	w.supervisor = &componentSupervisor{states: w.States}
+
+	return &Builder[Type, Status]{
+		workflow: w,
 	}
 }
 

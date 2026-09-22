@@ -103,6 +103,13 @@ type Workflow[Type any, Status StatusType] struct {
 	// PauseAfterstatusGraphErrCount. The tracking of errors is done in a way where errors need to be unique per process
 	// (consumer / timeout).
 	errorCounter ErrorCounter
+
+	// supervisor manages the lifecycle of all background components: ordered startup against the shared
+	// context, graceful shutdown, terminal error aggregation and panic isolation.
+	supervisor *componentSupervisor
+	// stopTimeout bounds how long Stop waits for all components to shut down. A zero value waits
+	// indefinitely which is the default and historic behaviour.
+	stopTimeout time.Duration
 }
 
 func (w *Workflow[Type, Status]) Name() string {
@@ -113,7 +120,7 @@ func (w *Workflow[Type, Status]) Run(ctx context.Context) {
 	// Ensure that the background consumers are only initialized once
 	w.once.Do(func() {
 		ctx, cancel := context.WithCancel(ctx)
-		
+
 		func() {
 			w.mu.Lock()
 			defer w.mu.Unlock()
@@ -122,108 +129,24 @@ func (w *Workflow[Type, Status]) Run(ctx context.Context) {
 			w.calledRun = true
 		}()
 
-		if !w.outboxConfig.disabled {
-			// Start the outbox consumer
-			track(w, func() {
-				outboxConsumer(w, w.outboxConfig)
-			})
-		}
-
-		// Start the state step consumers
-		for currentStatus, config := range w.consumers {
-			parallelCount := w.defaultOpts.parallelCount
-			if config.parallelCount != 0 {
-				parallelCount = config.parallelCount
-			}
-
-			if parallelCount < 2 {
-				// Launch all consumers in runners
-				track(w, func() {
-					consumeStepEvents(w, currentStatus, config, 1, 1)
-				})
-			} else {
-				// Run as sharded parallel consumers
-				for i := 1; i <= parallelCount; i++ {
-					track(w, func() {
-						consumeStepEvents(w, currentStatus, config, i, parallelCount)
-					})
-				}
-			}
-		}
-
-		// Only start timeout consumers if the timeout store is provided. This allows for the timeout store to
-		// be optional for workflows where the timeout feature is not needed.
-		if w.timeoutStore != nil {
-			for status, timeouts := range w.timeouts {
-				track(w, func() {
-					timeoutPoller(w, status, timeouts)
-				})
-				track(w, func() {
-					timeoutAutoInserterConsumer(w, status, timeouts)
-				})
-			}
-		}
-
-		// Start the connected stream consumers
-		for _, config := range w.connectorConfigs {
-			parallelCount := w.defaultOpts.parallelCount
-			if config.parallelCount != 0 {
-				parallelCount = config.parallelCount
-			}
-
-			if parallelCount < 2 {
-				// Launch all consumers in runners
-				track(w, func() {
-					connectorConsumer(w, config, 1, 1)
-				})
-			} else {
-				// Run as sharded parallel consumers
-				for i := 1; i <= config.parallelCount; i++ {
-					track(w, func() {
-						connectorConsumer(w, config, i, config.parallelCount)
-					})
-				}
-			}
-		}
-
-		// Launch all the run state change hooks that consume run state changes and respond according to the user's
-		// configuration.
-		for state, hook := range w.runStateChangeHooks {
-			track(w, func() {
-				runStateChangeHookConsumer(w, state, hook)
-			})
-		}
-
-		// Launch the delete consumer which will manage all data deletion requests.
-		track(w, func() {
-			deleteConsumer(w)
-		})
-
-		// Only start the paused record retry consumer if enabled.
-		if w.pausedRecordsRetry.enabled {
-			track(w, func() {
-				pausedRecordsRetryConsumer(w)
-			})
+		// Assemble all background components and launch them under the
+		// supervisor against the workflow's shared context.
+		for _, spec := range w.components() {
+			w.launch(spec)
 		}
 	})
 
 	w.launching.Wait()
 }
 
-// track starts a new goroutine to execute the provided function and ensures
-// it is tracked using launching.
-func track[Type any, Status StatusType](w *Workflow[Type, Status], fn func()) {
-	w.launching.Add(1)
-	go fn()
-}
-
 // run is a standardise way of running blocking calls with a built-in retry mechanism.
+// The terminal error, if any, is returned to the caller once the process exits.
 func (w *Workflow[Type, Status]) run(
 	role string,
 	processName string,
 	process func(ctx context.Context) error,
 	errBackOff time.Duration,
-) {
+) error {
 	w.updateState(processName, StateIdle)
 	defer w.updateState(processName, StateShutdown)
 	// Mark that another go routine has launched and been added to internal state
@@ -248,7 +171,7 @@ func (w *Workflow[Type, Status]) run(
 				"process_name": processName,
 			})
 
-			return
+			return err
 		}
 	}
 }
@@ -324,7 +247,7 @@ func (w *Workflow[Type, Status]) Stop() {
 	w.mu.Lock()
 	cancel := w.cancel
 	w.mu.Unlock()
-	
+
 	if cancel == nil {
 		return
 	}
@@ -332,22 +255,6 @@ func (w *Workflow[Type, Status]) Stop() {
 	// Cancel the parent context of the workflow to gracefully shutdown.
 	cancel()
 
-	for {
-		var runningProcesses int
-		for _, state := range w.States() {
-			switch state {
-			case StateUnknown, StateShutdown:
-				continue
-			default:
-				runningProcesses++
-			}
-		}
-
-		// Once all processes have exited then return
-		if runningProcesses == 0 {
-			return
-		}
-
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Wait for all components to shut down gracefully.
+	w.supervisor.waitForShutdown(w.stopTimeout)
 }

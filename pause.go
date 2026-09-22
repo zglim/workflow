@@ -44,7 +44,7 @@ func maybePause[Type any, Status StatusType](
 	return true, nil
 }
 
-func pausedRecordsRetryConsumer[Type any, Status StatusType](w *Workflow[Type, Status]) {
+func pausedRecordsRetryComponent[Type any, Status StatusType](w *Workflow[Type, Status]) componentSpec {
 	role := makeRole(
 		w.Name(),
 		"paused",
@@ -59,41 +59,46 @@ func pausedRecordsRetryConsumer[Type any, Status StatusType](w *Workflow[Type, S
 		"retry",
 		"consumer",
 	)
-	w.run(role, processName, func(ctx context.Context) error {
-		topic := RunStateChangeTopic(w.Name())
-		stream, err := w.eventStreamer.NewReceiver(
-			ctx,
-			topic,
-			role,
-			WithReceiverPollFrequency(w.defaultOpts.pollingFrequency),
-		)
-		if err != nil {
-			return err
-		}
-		defer stream.Close()
+	return componentSpec{
+		role:        role,
+		processName: processName,
+		errBackOff:  w.defaultOpts.errBackOff,
+		process: func(ctx context.Context) error {
+			topic := RunStateChangeTopic(w.Name())
+			stream, err := w.eventStreamer.NewReceiver(
+				ctx,
+				topic,
+				role,
+				WithReceiverPollFrequency(w.defaultOpts.pollingFrequency),
+			)
+			if err != nil {
+				return err
+			}
+			defer stream.Close()
 
-		lagAlert := w.pausedRecordsRetry.resumeAfter * 3
-		if lagAlert < time.Minute {
-			lagAlert = w.pausedRecordsRetry.resumeAfter + time.Minute*5
-		}
+			lagAlert := w.pausedRecordsRetry.resumeAfter * 3
+			if lagAlert < time.Minute {
+				lagAlert = w.pausedRecordsRetry.resumeAfter + time.Minute*5
+			}
 
-		return consume(
-			ctx,
-			w.Name(),
-			processName,
-			stream,
-			autoRetryConsumer(
-				w.recordStore.Lookup,
-				w.recordStore.Store,
+			return consume(
+				ctx,
+				w.Name(),
+				processName,
+				stream,
+				autoRetryConsumer(
+					w.recordStore.Lookup,
+					w.recordStore.Store,
+					w.clock,
+					w.pausedRecordsRetry.resumeAfter,
+				),
 				w.clock,
 				w.pausedRecordsRetry.resumeAfter,
-			),
-			w.clock,
-			w.pausedRecordsRetry.resumeAfter,
-			lagAlert,
-			filterByRunState(RunStatePaused),
-		)
-	}, w.defaultOpts.errBackOff)
+				lagAlert,
+				filterByRunState(RunStatePaused),
+			)
+		},
+	}
 }
 
 func autoRetryConsumer(

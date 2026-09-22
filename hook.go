@@ -9,11 +9,11 @@ import (
 // RunStateChangeHookFunc defines the function signature for all hooks associated to the run.
 type RunStateChangeHookFunc[Type any, Status StatusType] func(ctx context.Context, record *TypedRecord[Type, Status]) error
 
-func runStateChangeHookConsumer[Type any, Status StatusType](
+func runStateChangeHookComponent[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	runState RunState,
 	hook RunStateChangeHookFunc[Type, Status],
-) {
+) componentSpec {
 	role := makeRole(
 		w.Name(),
 		runState.String(),
@@ -22,36 +22,41 @@ func runStateChangeHookConsumer[Type any, Status StatusType](
 	)
 
 	processName := makeRole(runState.String(), "run-state-change-hook", "consumer")
-	w.run(role, processName, func(ctx context.Context) error {
-		topic := RunStateChangeTopic(w.Name())
-		stream, err := w.eventStreamer.NewReceiver(
-			ctx,
-			topic,
-			role,
-			WithReceiverPollFrequency(w.defaultOpts.pollingFrequency),
-		)
-		if err != nil {
-			return err
-		}
-		defer stream.Close()
+	return componentSpec{
+		role:        role,
+		processName: processName,
+		errBackOff:  w.defaultOpts.errBackOff,
+		process: func(ctx context.Context) error {
+			topic := RunStateChangeTopic(w.Name())
+			stream, err := w.eventStreamer.NewReceiver(
+				ctx,
+				topic,
+				role,
+				WithReceiverPollFrequency(w.defaultOpts.pollingFrequency),
+			)
+			if err != nil {
+				return err
+			}
+			defer stream.Close()
 
-		return consume(
-			ctx,
-			w.Name(),
-			processName,
-			stream,
-			runHook(
+			return consume(
+				ctx,
 				w.Name(),
 				processName,
-				w.recordStore.Lookup,
-				hook,
-			),
-			w.clock,
-			0,
-			w.defaultOpts.lagAlert,
-			filterByRunState(runState),
-		)
-	}, w.defaultOpts.errBackOff)
+				stream,
+				runHook(
+					w.Name(),
+					processName,
+					w.recordStore.Lookup,
+					hook,
+				),
+				w.clock,
+				0,
+				w.defaultOpts.lagAlert,
+				filterByRunState(runState),
+			)
+		},
+	}
 }
 
 func runHook[Type any, Status StatusType](

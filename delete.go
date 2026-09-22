@@ -4,7 +4,7 @@ import (
 	"context"
 )
 
-func deleteConsumer[Type any, Status StatusType](w *Workflow[Type, Status]) {
+func deleteComponent[Type any, Status StatusType](w *Workflow[Type, Status]) componentSpec {
 	role := makeRole(
 		w.Name(),
 		"delete",
@@ -12,34 +12,39 @@ func deleteConsumer[Type any, Status StatusType](w *Workflow[Type, Status]) {
 	)
 
 	processName := makeRole("delete", "consumer")
-	w.run(role, processName, func(ctx context.Context) error {
-		topic := DeleteTopic(w.Name())
-		stream, err := w.eventStreamer.NewReceiver(
-			ctx,
-			topic,
-			role,
-			WithReceiverPollFrequency(w.defaultOpts.pollingFrequency),
-		)
-		if err != nil {
-			return err
-		}
-		defer stream.Close()
+	return componentSpec{
+		role:        role,
+		processName: processName,
+		errBackOff:  w.defaultOpts.errBackOff,
+		process: func(ctx context.Context) error {
+			topic := DeleteTopic(w.Name())
+			stream, err := w.eventStreamer.NewReceiver(
+				ctx,
+				topic,
+				role,
+				WithReceiverPollFrequency(w.defaultOpts.pollingFrequency),
+			)
+			if err != nil {
+				return err
+			}
+			defer stream.Close()
 
-		return consume(
-			ctx,
-			w.Name(),
-			processName,
-			stream,
-			runDelete(
-				w.recordStore.Store,
-				w.recordStore.Lookup,
-				w.customDelete,
-			),
-			w.clock,
-			0,
-			w.defaultOpts.lagAlert,
-		)
-	}, w.defaultOpts.errBackOff)
+			return consume(
+				ctx,
+				w.Name(),
+				processName,
+				stream,
+				runDelete(
+					w.recordStore.Store,
+					w.recordStore.Lookup,
+					w.customDelete,
+				),
+				w.clock,
+				0,
+				w.defaultOpts.lagAlert,
+			)
+		},
+	}
 }
 
 func runDelete(

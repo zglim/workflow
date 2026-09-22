@@ -3,6 +3,7 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -34,7 +35,7 @@ func New(writer *sql.DB, reader *sql.DB, recordTableName string, outboxTableName
 		outboxTableName: outboxTableName,
 	}
 
-	e.recordCols = " `workflow_name`, `foreign_id`, `run_id`, `run_state`, `status`, `object`, `created_at`, `updated_at`, `meta` "
+	e.recordCols = " `workflow_name`, `foreign_id`, `run_id`, `run_state`, `status`, `object`, `created_at`, `updated_at`, `deadline`, `meta` "
 	e.recordSelectPrefix = " select " + e.recordCols + " from " + e.recordTableName + " where "
 
 	e.outboxCols = " `id`, `workflow_name`, `data`, `created_at` "
@@ -44,6 +45,57 @@ func New(writer *sql.DB, reader *sql.DB, recordTableName string, outboxTableName
 }
 
 var _ workflow.RecordStore = (*SQLStore)(nil)
+var _ workflow.VersionedRecordStore = (*SQLStore)(nil)
+
+// StoreIfVersion atomically persists the record only when the stored record's version still matches
+// expectedVersion. The row is locked for the duration of the transaction so concurrent conditional writers are
+// serialised; the loser receives workflow.ErrRecordVersionConflict.
+func (s *SQLStore) StoreIfVersion(ctx context.Context, r *workflow.Record, expectedVersion uint) error {
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var currentMeta []byte
+	row := tx.QueryRowContext(ctx,
+		"select meta from "+s.recordTableName+" where run_id=? for update",
+		r.RunID,
+	)
+	if err := row.Scan(&currentMeta); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.Wrap(workflow.ErrRecordNotFound, "")
+		}
+
+		return errors.Wrap(err, "store if version: lock row")
+	}
+
+	var current workflow.Record
+	if len(currentMeta) > 0 {
+		if err := json.Unmarshal(currentMeta, &current.Meta); err != nil {
+			return errors.Wrap(err, "store if version: unmarshal meta")
+		}
+	}
+
+	if current.Meta.Version != expectedVersion {
+		return errors.Wrap(workflow.ErrRecordVersionConflict, "")
+	}
+
+	if err := s.update(ctx, tx, r.RunID, r.Status, r.Object, int(r.RunState), r.Deadline, r.Meta); err != nil {
+		return err
+	}
+
+	eventData, err := workflow.MakeOutboxEventData(*r)
+	if err != nil {
+		return err
+	}
+
+	if _, err := s.insertOutboxEvent(ctx, tx, eventData.ID, eventData.WorkflowName, eventData.Data); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
 
 func (s *SQLStore) Store(ctx context.Context, r *workflow.Record) error {
 	tx, err := s.writer.BeginTx(ctx, nil)
@@ -66,12 +118,12 @@ func (s *SQLStore) Store(ctx context.Context, r *workflow.Record) error {
 	}
 
 	if mustCreate {
-		err := s.create(ctx, tx, r.WorkflowName, r.ForeignID, r.RunID, r.Status, r.Object, int(r.RunState), r.Meta)
+		err := s.create(ctx, tx, r.WorkflowName, r.ForeignID, r.RunID, r.Status, r.Object, int(r.RunState), r.Deadline, r.Meta)
 		if err != nil {
 			return err
 		}
 	} else {
-		err := s.update(ctx, tx, r.RunID, r.Status, r.Object, int(r.RunState), r.Meta)
+		err := s.update(ctx, tx, r.RunID, r.Status, r.Object, int(r.RunState), r.Deadline, r.Meta)
 		if err != nil {
 			return err
 		}

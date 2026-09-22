@@ -3,6 +3,7 @@ package wredis
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -30,6 +31,7 @@ func New(client redis.UniversalClient) *Store {
 }
 
 var _ workflow.RecordStore = (*Store)(nil)
+var _ workflow.VersionedRecordStore = (*Store)(nil)
 
 // Lua scripts for atomic operations
 var (
@@ -85,6 +87,49 @@ var (
 
 		return 0
 	`)
+
+	// storeIfVersionScript conditionally writes a record only when the stored record's Meta.Version still
+	// matches the expected version. It returns 'OK' on success and 'CONFLICT' when another writer has advanced
+	// the version first, giving record-level deadline cancellation atomic optimistic-lock semantics.
+	storeIfVersionScript = redis.NewScript(`
+		local record_key = KEYS[1]
+		local index_key = KEYS[2]
+		local list_key = KEYS[3]
+		local global_list_key = KEYS[4]
+		local outbox_key = KEYS[5]
+		local reverse_index_key = KEYS[6]
+
+		local record_data = ARGV[1]
+		local run_id = ARGV[2]
+		local score = ARGV[3]
+		local outbox_data = ARGV[4]
+		local outbox_event_id = ARGV[5]
+		local expected_version = tonumber(ARGV[6])
+
+		local current = redis.call('GET', record_key)
+		if not current then
+			return 'NOTFOUND'
+		end
+
+		local current_record = cjson.decode(current)
+		local current_version = 0
+		if current_record.Meta and current_record.Meta.Version then
+			current_version = tonumber(current_record.Meta.Version)
+		end
+
+		if current_version ~= expected_version then
+			return 'CONFLICT'
+		end
+
+		redis.call('SET', record_key, record_data)
+		redis.call('SET', index_key, run_id)
+		redis.call('ZADD', list_key, score, run_id)
+		redis.call('ZADD', global_list_key, score, run_id)
+		redis.call('LPUSH', outbox_key, outbox_data)
+		redis.call('SET', reverse_index_key, outbox_key)
+
+		return 'OK'
+	`)
 )
 
 // Store implements the RecordStore interface with outbox pattern
@@ -128,6 +173,59 @@ func (s *Store) Store(ctx context.Context, record *workflow.Record) error {
 	return storeScript.Run(ctx, s.client,
 		[]string{recordKey, indexKey, listKey, globalListKey, outboxKey, reverseIndexKey},
 		string(recordData), record.RunID, score, string(outboxData), eventData.ID).Err()
+}
+
+// StoreIfVersion implements workflow.VersionedRecordStore: the record is persisted atomically only when the
+// stored version matches expectedVersion, otherwise workflow.ErrRecordVersionConflict is returned.
+func (s *Store) StoreIfVersion(ctx context.Context, record *workflow.Record, expectedVersion uint) error {
+	eventData, err := workflow.MakeOutboxEventData(*record)
+	if err != nil {
+		return err
+	}
+
+	outboxEvent := &workflow.OutboxEvent{
+		ID:           eventData.ID,
+		WorkflowName: eventData.WorkflowName,
+		Data:         eventData.Data,
+		CreatedAt:    time.Now(),
+	}
+
+	recordData, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	outboxData, err := json.Marshal(outboxEvent)
+	if err != nil {
+		return err
+	}
+
+	recordKey := recordKeyPrefix + record.RunID
+	indexKey := indexKeyPrefix + record.WorkflowName + ":" + record.ForeignID
+	listKey := "workflow:list:" + record.WorkflowName
+	globalListKey := "workflow:list:all"
+	outboxKey := outboxKeyPrefix + record.WorkflowName
+	reverseIndexKey := outboxReverseKeyPrefix + eventData.ID
+
+	score := strconv.FormatFloat(float64(record.CreatedAt.Unix()), 'f', -1, 64)
+
+	res, err := storeIfVersionScript.Run(ctx, s.client,
+		[]string{recordKey, indexKey, listKey, globalListKey, outboxKey, reverseIndexKey},
+		string(recordData), record.RunID, score, string(outboxData), eventData.ID, expectedVersion).Result()
+	if err != nil {
+		return err
+	}
+
+	switch res {
+	case "OK":
+		return nil
+	case "NOTFOUND":
+		return workflow.ErrRecordNotFound
+	case "CONFLICT":
+		return workflow.ErrRecordVersionConflict
+	default:
+		return fmt.Errorf("unexpected store-if-version result: %v", res)
+	}
 }
 
 // Lookup implements the RecordStore interface

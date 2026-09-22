@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -105,6 +106,105 @@ func pollTimeouts[Type any, Status StatusType](
 }
 
 type completeFunc func(ctx context.Context, id int64) error
+
+// deadlinePoller polls for expired record-level deadlines. It reuses the TimeoutStore (the deadline is persisted
+// as a timeout record keyed by the synthetic deadlineTimeoutStatus) so that deadlines do not require a separate
+// polling line from the per-stage timeout mechanism.
+func deadlinePoller[Type any, Status StatusType](w *Workflow[Type, Status]) {
+	role := makeRole(w.Name(), "deadline-consumer")
+	processName := makeRole("deadline-consumer")
+
+	pollingFrequency := w.defaultOpts.pollingFrequency
+	errBackOff := w.defaultOpts.errBackOff
+
+	w.run(role, processName, func(ctx context.Context) error {
+		for {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
+			expired, err := w.timeoutStore.ListValid(ctx, w.Name(), deadlineTimeoutStatus, w.clock.Now())
+			if err != nil {
+				return err
+			}
+
+			for _, dl := range expired {
+				err = processDeadline(ctx, w, dl)
+				if err != nil {
+					return err
+				}
+			}
+
+			err = wait(ctx, pollingFrequency)
+			if err != nil {
+				return err
+			}
+		}
+	}, errBackOff)
+}
+
+// processDeadline idempotently moves an expired deadline's record to RunStateCancelled. It is safe to call
+// repeatedly: a record that has already reached a terminal state results in the deadline record being completed
+// without any further state change. When the store implements VersionedRecordStore the cancellation is a single
+// atomic compare-and-swap on the record version so a racing deadline poller or stage consumer can never produce
+// a duplicate transition or roll a state back; the loser returns ErrRecordVersionConflict and leaves the
+// deadline record uncompleted for the next poll cycle.
+func processDeadline[Type any, Status StatusType](
+	ctx context.Context,
+	w *Workflow[Type, Status],
+	dl TimeoutRecord,
+) error {
+	latest, err := w.recordStore.Lookup(ctx, dl.RunID)
+	if errors.Is(err, ErrRecordNotFound) {
+		// Record no longer exists - nothing to cancel. Mark the deadline as processed so it isn't retried.
+		return w.timeoutStore.Complete(ctx, dl.ID)
+	} else if err != nil {
+		return err
+	}
+
+	if latest.RunState.Finished() {
+		// The record has already reached a terminal state (completed, cancelled, or deleted). The deadline must
+		// not roll the state back, so mark it as processed.
+		return w.timeoutStore.Complete(ctx, dl.ID)
+	}
+
+	expectedVersion := latest.Meta.Version
+
+	// Mutate a copy of the record into the cancelled state and validate the run state transition without
+	// bypassing the state machine.
+	cancelled := *latest
+	err = (&runStateControllerImpl{record: &cancelled}).transition(RunStateCancelled, RunStateDeadlineExceededReason)
+	if err != nil {
+		return fmt.Errorf("deadline cancel error: %w", err)
+	}
+
+	// updateRecord increments the version and stamps the status description without persisting.
+	cancelled.Meta.Version = expectedVersion
+	err = updateRecord(ctx, func(ctx context.Context, r *Record) error {
+		versioned, ok := w.recordStore.(VersionedRecordStore)
+		if ok {
+			return versioned.StoreIfVersion(ctx, r, expectedVersion)
+		}
+
+		return w.recordStore.Store(ctx, r)
+	}, &cancelled, latest.RunState, latest.Meta.StatusDescription)
+	if errors.Is(err, ErrRecordVersionConflict) {
+		w.logger.Debug(ctx, "deadline cancellation lost concurrent record update race", map[string]string{
+			"workflow":   latest.WorkflowName,
+			"run_id":     latest.RunID,
+			"foreign_id": latest.ForeignID,
+		})
+
+		// Another writer (a stage consumer or an earlier deadline cancellation) won. The deadline record is left
+		// uncompleted; the next poll will observe the new state and either complete silently (terminal) or retry
+		// the cancellation against the fresh version.
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	return w.timeoutStore.Complete(ctx, dl.ID)
+}
 
 func processTimeout[Type any, Status StatusType](
 	ctx context.Context,

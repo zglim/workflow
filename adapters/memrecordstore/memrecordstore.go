@@ -127,6 +127,7 @@ func (s *Store) Lookup(ctx context.Context, id string) (*workflow.Record, error)
 		Object:       record.Object,
 		CreatedAt:    record.CreatedAt,
 		UpdatedAt:    record.UpdatedAt,
+		Deadline:     record.Deadline,
 		Meta:         record.Meta,
 	}, nil
 }
@@ -134,6 +135,26 @@ func (s *Store) Lookup(ctx context.Context, id string) (*workflow.Record, error)
 func (s *Store) Store(ctx context.Context, record *workflow.Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	return s.storeLocked(record, false, 0)
+}
+
+// StoreIfVersion atomically persists the record only when the stored version still matches expectedVersion.
+// It returns workflow.ErrRecordVersionConflict when another writer has advanced the version first.
+func (s *Store) StoreIfVersion(ctx context.Context, record *workflow.Record, expectedVersion uint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.storeLocked(record, true, expectedVersion)
+}
+
+func (s *Store) storeLocked(record *workflow.Record, checkVersion bool, expectedVersion uint) error {
+	if checkVersion {
+		current, ok := s.store[record.RunID]
+		if ok && current.Meta.Version != expectedVersion {
+			return workflow.ErrRecordVersionConflict
+		}
+	}
 
 	// Add record to store
 	uk := uniqueKey(record.WorkflowName, record.ForeignID)
@@ -182,6 +203,7 @@ func (s *Store) Latest(ctx context.Context, workflowName, foreignID string) (*wo
 		Object:       record.Object,
 		CreatedAt:    record.CreatedAt,
 		UpdatedAt:    record.UpdatedAt,
+		Deadline:     record.Deadline,
 		Meta:         record.Meta,
 	}, nil
 }

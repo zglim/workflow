@@ -118,21 +118,35 @@ func (rsc *runStateControllerImpl) DeleteData(ctx context.Context, reason string
 }
 
 func (rsc *runStateControllerImpl) update(ctx context.Context, rs RunState, reason string) error {
+	previousRunState := rsc.record.RunState
+	if err := rsc.transition(rs, reason); err != nil {
+		return err
+	}
+
+	return updateRecord(ctx, rsc.store, rsc.record, previousRunState, rsc.record.Meta.StatusDescription)
+}
+
+// transition applies a run state change in memory after validating it against the state machine. It does not
+// persist, allowing callers that need an atomic conditional write (such as record-level deadline cancellation)
+// to persist the resulting record through their own optimistic-lock path.
+func (rsc *runStateControllerImpl) transition(rs RunState, reason string) error {
 	valid, ok := runStateTransitions[rsc.record.RunState]
 	if !ok || !valid[rs] {
 		return fmt.Errorf("invalid RunState: from %s | to %s", rsc.record.RunState, rs)
 	}
 
-	previousRunState := rsc.record.RunState
 	rsc.record.RunState = rs
 	rsc.record.Meta.RunStateReason = reason
-	return updateRecord(ctx, rsc.store, rsc.record, previousRunState, rsc.record.Meta.StatusDescription)
+	return nil
 }
 
 var runStateTransitions = map[RunState]map[RunState]bool{
 	RunStateInitiated: {
 		RunStateRunning: true,
 		RunStatePaused:  true,
+		// A record-level deadline can elapse before the first consumer picks the record up, in which case it is
+		// cancelled straight from Initiated.
+		RunStateCancelled: true,
 	},
 	RunStateRunning: {
 		RunStateCompleted: true,

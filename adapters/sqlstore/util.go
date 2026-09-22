@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"time"
 
 	"github.com/luno/jettison/errors"
 	"github.com/luno/jettison/j"
@@ -17,6 +18,7 @@ func (s *SQLStore) create(
 	status int,
 	object []byte,
 	runState int,
+	deadline time.Time,
 	meta workflow.Meta,
 ) error {
 	metaBytes, err := json.Marshal(meta)
@@ -25,13 +27,14 @@ func (s *SQLStore) create(
 	}
 
 	_, err = tx.ExecContext(ctx, "insert into "+s.recordTableName+" set "+
-		" workflow_name=?, foreign_id=?, run_id=?, run_state=?, status=?, object=?, created_at=now(), updated_at=now(), meta=? ",
+		" workflow_name=?, foreign_id=?, run_id=?, run_state=?, status=?, object=?, created_at=now(), updated_at=now(), deadline=?, meta=? ",
 		workflowName,
 		foreignID,
 		runID,
 		runState,
 		status,
 		object,
+		nullableTime(deadline),
 		metaBytes,
 	)
 	if err != nil {
@@ -54,6 +57,7 @@ func (s *SQLStore) update(
 	status int,
 	object []byte,
 	runState int,
+	deadline time.Time,
 	meta workflow.Meta,
 ) error {
 	metaBytes, err := json.Marshal(meta)
@@ -62,10 +66,11 @@ func (s *SQLStore) update(
 	}
 
 	_, err = tx.ExecContext(ctx, "update "+s.recordTableName+" set "+
-		" run_state=?, status=?, object=?, updated_at=now(), meta=? where run_id=?",
+		" run_state=?, status=?, object=?, updated_at=now(), deadline=?, meta=? where run_id=?",
 		runState,
 		status,
 		object,
+		nullableTime(deadline),
 		metaBytes,
 		runID,
 	)
@@ -163,6 +168,7 @@ func (s *SQLStore) listOutboxWhere(
 func recordScan(row row) (*workflow.Record, error) {
 	var r workflow.Record
 	var meta []byte
+	var deadline sql.NullTime
 	err := row.Scan(
 		&r.WorkflowName,
 		&r.ForeignID,
@@ -172,6 +178,7 @@ func recordScan(row row) (*workflow.Record, error) {
 		&r.Object,
 		&r.CreatedAt,
 		&r.UpdatedAt,
+		&deadline,
 		&meta,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -187,7 +194,21 @@ func recordScan(row row) (*workflow.Record, error) {
 		}
 	}
 
+	if deadline.Valid {
+		r.Deadline = deadline.Time
+	}
+
 	return &r, nil
+}
+
+// nullableTime returns nil for the zero time so that records without a deadline (including records written
+// before the deadline column existed) persist and read back as the zero value, keeping behaviour unchanged.
+func nullableTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+
+	return t
 }
 
 func outboxScan(row row) (*workflow.OutboxEvent, error) {

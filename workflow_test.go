@@ -672,6 +672,7 @@ func TestExpectedProcesses(t *testing.T) {
 		"otp_verified-timeout-consumer":               true,
 		"outbox-consumer":                             true,
 		"completed-run-state-change-hook-consumer":    true,
+		"deadline-consumer":                           true,
 		"delete-consumer":                             true,
 		"paused-records-retry-consumer":               true,
 	}
@@ -710,6 +711,7 @@ func TestExpectedProcesses_outboxDisabled(t *testing.T) {
 		"otp_verified-timeout-auto-inserter-consumer": true,
 		"otp_verified-timeout-consumer":               true,
 		"completed-run-state-change-hook-consumer":    true,
+		"deadline-consumer":                           true,
 		"delete-consumer":                             true,
 		"paused-records-retry-consumer":               true,
 	}

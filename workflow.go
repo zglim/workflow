@@ -113,7 +113,7 @@ func (w *Workflow[Type, Status]) Run(ctx context.Context) {
 	// Ensure that the background consumers are only initialized once
 	w.once.Do(func() {
 		ctx, cancel := context.WithCancel(ctx)
-		
+
 		func() {
 			w.mu.Lock()
 			defer w.mu.Unlock()
@@ -154,6 +154,12 @@ func (w *Workflow[Type, Status]) Run(ctx context.Context) {
 		// Only start timeout consumers if the timeout store is provided. This allows for the timeout store to
 		// be optional for workflows where the timeout feature is not needed.
 		if w.timeoutStore != nil {
+			// The record-level deadline poller shares the TimeoutStore with per-stage timeouts but has its own
+			// role so it runs once per workflow regardless of which statuses configure stage timeouts.
+			track(w, func() {
+				deadlinePoller(w)
+			})
+
 			for status, timeouts := range w.timeouts {
 				track(w, func() {
 					timeoutPoller(w, status, timeouts)
@@ -324,7 +330,7 @@ func (w *Workflow[Type, Status]) Stop() {
 	w.mu.Lock()
 	cancel := w.cancel
 	w.mu.Unlock()
-	
+
 	if cancel == nil {
 		return
 	}

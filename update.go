@@ -45,6 +45,7 @@ func newUpdater[Type any, Status StatusType](
 			Object:       object,
 			CreatedAt:    record.CreatedAt,
 			UpdatedAt:    clock.Now(),
+			Deadline:     record.Deadline,
 			Meta:         record.Meta,
 		}
 

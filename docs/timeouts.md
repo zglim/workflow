@@ -386,3 +386,35 @@ Monitor timeout processing with metrics:
 2. **No Sub-second Precision**: Minimum polling frequency is typically 1 second
 3. **Clock Dependency**: Relies on system clock for accurate timing
 4. **Storage Growth**: Long-running timeouts accumulate in storage
+
+## Record-Level Deadlines
+
+A per-stage timeout (above) only applies while a record sits on a single status. A **deadline** applies to the
+entire lifecycle of a run: when the absolute deadline elapses the record is moved to `RunStateCancelled`
+regardless of the status it has reached, and regardless of whether it is `Initiated`, `Running`, or `Paused`.
+Pausing a record does not exempt it from its deadline.
+
+Set a deadline when triggering (or scheduling) a run. A `TimeoutStore` must be configured on the workflow.
+
+```go
+runID, err := wf.Trigger(ctx, foreignID,
+    workflow.WithDeadline[Order, Status](time.Now().Add(24*time.Hour)),
+)
+```
+
+Behaviour and semantics:
+
+- **Stage timeout vs deadline**: a stage timeout is scoped to one status and runs the configured `TimeoutFunc`
+  (which can transition to another status); a deadline always ends the run in `Cancelled`. When both are
+  configured whichever fires first takes effect. A deadline cancellation records the run state reason
+  `"record deadline exceeded"`, keeping it distinguishable from stage-timeout handling and from a manual
+  `Cancel`.
+- **Idempotency**: deadline cancellation is an atomic optimistic-lock operation on the record version
+  (`VersionedRecordStore.StoreIfVersion`). The deadline poller and stage consumers can race but the record
+  transitions to `Cancelled` exactly once, never rolls back from a terminal state, and no stage is executed
+  twice. Repeated processing of an already-terminal record completes silently.
+- **Awaiting**: `Await` on a run cancelled by its deadline returns `ErrRunDeadlineExceeded` (which wraps
+  `ErrRunCancelled`); cancellations for other reasons return `ErrRunCancelled` with the recorded reason.
+- **Backwards compatibility**: the persisted `Deadline` is optional and zero-valued for older records, whose
+  behaviour is unchanged. On SQL stores the column is nullable
+  (`ALTER TABLE workflow_records ADD COLUMN deadline datetime(3) NULL;`).

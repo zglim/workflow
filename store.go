@@ -30,6 +30,22 @@ type RecordStore interface {
 	DeleteOutboxEvent(ctx context.Context, id string) error
 }
 
+// VersionedRecordStore is an optional RecordStore capability that performs an optimistic, atomic conditional
+// update: the record is only persisted when its current version in the store still matches expectedVersion.
+//
+// On success the record must be stored with record.Meta.Version (already incremented by the caller) and the
+// same outbox semantics as Store must apply. When the current version differs from expectedVersion
+// ErrRecordVersionConflict is returned without any write taking place.
+//
+// Record-level deadline cancellation relies on this interface to guarantee that the cancellation wins at most
+// once even when the deadline poller races a stage consumer. RecordStore implementations that do not provide
+// it still function: deadline cancellation falls back to the regular Store path.
+type VersionedRecordStore interface {
+	RecordStore
+
+	StoreIfVersion(ctx context.Context, record *Record, expectedVersion uint) error
+}
+
 type TestingRecordStore interface {
 	RecordStore
 

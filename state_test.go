@@ -68,6 +68,7 @@ func TestInternalState(t *testing.T) {
 		"consume-other-stream-connector-to-example-consumer-1-of-2": workflow.StateShutdown,
 		"consume-other-stream-connector-to-example-consumer-2-of-2": workflow.StateShutdown,
 		"outbox-consumer":                                           workflow.StateShutdown,
+		"deadline-consumer":                                         workflow.StateShutdown,
 		"delete-consumer":                                           workflow.StateShutdown,
 		"paused-records-retry-consumer":                             workflow.StateShutdown,
 	}, wf.States())

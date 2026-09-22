@@ -39,6 +39,13 @@ type Record struct {
 	// the record.
 	UpdatedAt time.Time
 
+	// Deadline is the optional absolute time at which the workflow Run must be cancelled regardless of the
+	// status it has reached. Unlike a per-stage timeout (see AddTimeout) a deadline covers the entire lifecycle
+	// of the record: when it elapses the record is moved to RunStateCancelled with a timeout reason while it may
+	// be Initiated, Running, or Paused. The zero value means no deadline is configured which keeps the behaviour
+	// of records created before this field existed unchanged.
+	Deadline time.Time
+
 	// Meta stores any additional metadata related to the record, such as human-readable reasons for the RunState
 	// or other contextual information that can assist with debugging or auditing.
 	Meta Meta

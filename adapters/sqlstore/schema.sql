@@ -58,6 +58,11 @@ create table workflow_records (
     -- Updated on every state transition
     updated_at             datetime(3) not null,
 
+    -- Optional record-level deadline: absolute time after which the run is cancelled regardless of its status.
+    -- Nullable for backwards compatibility: rows created before this column existed have no deadline and behave
+    -- exactly as before. Add via: ALTER TABLE workflow_records ADD COLUMN deadline datetime(3) NULL;
+    deadline               datetime(3) null,
+
     -- Optional metadata: arbitrary data for custom use cases
     -- Can store additional context, tags, or tracking information
     meta                   blob,
@@ -76,6 +81,10 @@ create table workflow_records (
     -- Index for time-based queries and cleanup operations
     -- Useful for archiving old records or time-based reporting
     index by_created_at (created_at)
+    ,
+
+    -- Index for the deadline poller that finds runs whose record-level deadline has elapsed
+    index by_deadline (deadline)
 );
 
 -- -----------------------------------------------------------------------------

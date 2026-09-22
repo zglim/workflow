@@ -2,9 +2,11 @@ package workflow
 
 import (
 	"context"
+
+	"github.com/luno/workflow/internal/component"
 )
 
-func deleteConsumer[Type any, Status StatusType](w *Workflow[Type, Status]) {
+func newDeleteConsumerComponent[Type any, Status StatusType](w *Workflow[Type, Status]) component.Component {
 	role := makeRole(
 		w.Name(),
 		"delete",
@@ -12,7 +14,7 @@ func deleteConsumer[Type any, Status StatusType](w *Workflow[Type, Status]) {
 	)
 
 	processName := makeRole("delete", "consumer")
-	w.run(role, processName, func(ctx context.Context) error {
+	return w.run(role, processName, func(ctx context.Context) error {
 		topic := DeleteTopic(w.Name())
 		stream, err := w.eventStreamer.NewReceiver(
 			ctx,

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sync"
 	"time"
 
 	"k8s.io/utils/clock"
 
+	"github.com/luno/workflow/internal/component"
 	"github.com/luno/workflow/internal/graph"
 	"github.com/luno/workflow/internal/metrics"
 )
@@ -86,12 +88,9 @@ type Workflow[Type any, Status StatusType] struct {
 	// internalState holds the State of all expected consumers and timeout go routines using their role names
 	// as the key.
 	internalState map[string]State
-	// launching tracks the number of goroutines initiated but not yet running.
-	// There's a non-deterministic delay between spawning a goroutine (`go myFunc()`)
-	// and its addition to workflow's internalState. To ensure Run returns only after
-	// all processes are recorded in internalState, launching provides a way to track
-	// and block until this transition is complete.
-	launching sync.WaitGroup
+	// components owns the lifecycle (start, shared context, graceful shutdown,
+	// error aggregation and panic isolation) of all background processes.
+	components *component.Manager
 
 	// runPool pools Run objects to reduce allocations
 	runPool *sync.Pool
@@ -113,108 +112,114 @@ func (w *Workflow[Type, Status]) Run(ctx context.Context) {
 	// Ensure that the background consumers are only initialized once
 	w.once.Do(func() {
 		ctx, cancel := context.WithCancel(ctx)
-		
+
 		func() {
 			w.mu.Lock()
 			defer w.mu.Unlock()
 			w.ctx = ctx
 			w.cancel = cancel
 			w.calledRun = true
+
+			w.components = component.New(ctx, component.WithErrorHook(func(_ string, err error) {
+				w.logger.Error(ctx, err)
+			}))
 		}()
 
-		if !w.outboxConfig.disabled {
-			// Start the outbox consumer
-			track(w, func() {
-				outboxConsumer(w, w.outboxConfig)
-			})
-		}
-
-		// Start the state step consumers
-		for currentStatus, config := range w.consumers {
-			parallelCount := w.defaultOpts.parallelCount
-			if config.parallelCount != 0 {
-				parallelCount = config.parallelCount
-			}
-
-			if parallelCount < 2 {
-				// Launch all consumers in runners
-				track(w, func() {
-					consumeStepEvents(w, currentStatus, config, 1, 1)
-				})
-			} else {
-				// Run as sharded parallel consumers
-				for i := 1; i <= parallelCount; i++ {
-					track(w, func() {
-						consumeStepEvents(w, currentStatus, config, i, parallelCount)
-					})
-				}
-			}
-		}
-
-		// Only start timeout consumers if the timeout store is provided. This allows for the timeout store to
-		// be optional for workflows where the timeout feature is not needed.
-		if w.timeoutStore != nil {
-			for status, timeouts := range w.timeouts {
-				track(w, func() {
-					timeoutPoller(w, status, timeouts)
-				})
-				track(w, func() {
-					timeoutAutoInserterConsumer(w, status, timeouts)
-				})
-			}
-		}
-
-		// Start the connected stream consumers
-		for _, config := range w.connectorConfigs {
-			parallelCount := w.defaultOpts.parallelCount
-			if config.parallelCount != 0 {
-				parallelCount = config.parallelCount
-			}
-
-			if parallelCount < 2 {
-				// Launch all consumers in runners
-				track(w, func() {
-					connectorConsumer(w, config, 1, 1)
-				})
-			} else {
-				// Run as sharded parallel consumers
-				for i := 1; i <= config.parallelCount; i++ {
-					track(w, func() {
-						connectorConsumer(w, config, i, config.parallelCount)
-					})
-				}
-			}
-		}
-
-		// Launch all the run state change hooks that consume run state changes and respond according to the user's
-		// configuration.
-		for state, hook := range w.runStateChangeHooks {
-			track(w, func() {
-				runStateChangeHookConsumer(w, state, hook)
-			})
-		}
-
-		// Launch the delete consumer which will manage all data deletion requests.
-		track(w, func() {
-			deleteConsumer(w)
-		})
-
-		// Only start the paused record retry consumer if enabled.
-		if w.pausedRecordsRetry.enabled {
-			track(w, func() {
-				pausedRecordsRetryConsumer(w)
-			})
-		}
+		// Assemble the managed components in their historical dependency order.
+		// Every component shares the workflow context and is driven by the
+		// component manager for start-up, shutdown and error handling.
+		w.registerComponents()
 	})
 
-	w.launching.Wait()
+	// Block until every component has recorded its initial state, preserving
+	// Run's guarantee that all processes are tracked by the time it returns.
+	w.mu.Lock()
+	components := w.components
+	w.mu.Unlock()
+	components.WaitLaunched()
 }
 
-// track starts a new goroutine to execute the provided function and ensures
-// it is tracked using launching.
-func track[Type any, Status StatusType](w *Workflow[Type, Status], fn func()) {
-	w.launching.Add(1)
-	go fn()
+// startComponent registers a single managed background process with the
+// workflow's component manager.
+func (w *Workflow[Type, Status]) startComponent(c component.Component) {
+	w.components.Start(c)
+}
+
+// registerComponents assembles all background processes in their historical
+// dependency order: outbox, step consumers, timeout pollers and auto-inserters,
+// connector consumers, run-state-change hooks, delete consumer and finally the
+// paused-records retry consumer. Status- and run-state-keyed processes are
+// sorted for deterministic registration (map iteration was previously random).
+func (w *Workflow[Type, Status]) registerComponents() {
+	if !w.outboxConfig.disabled {
+		w.startComponent(newOutboxComponent(w, w.outboxConfig))
+	}
+
+	for _, currentStatus := range sortedKeys(w.consumers) {
+		config := w.consumers[currentStatus]
+
+		parallelCount := w.defaultOpts.parallelCount
+		if config.parallelCount != 0 {
+			parallelCount = config.parallelCount
+		}
+
+		if parallelCount < 2 {
+			w.startComponent(newStepConsumerComponent(w, currentStatus, config, 1, 1))
+			continue
+		}
+
+		for i := 1; i <= parallelCount; i++ {
+			w.startComponent(newStepConsumerComponent(w, currentStatus, config, i, parallelCount))
+		}
+	}
+
+	// Only start timeout consumers if the timeout store is provided. This allows
+	// for the timeout store to be optional for workflows where timeouts are not
+	// used.
+	if w.timeoutStore != nil {
+		for _, status := range sortedKeys(w.timeouts) {
+			w.startComponent(newTimeoutPollerComponent(w, status, w.timeouts[status]))
+			w.startComponent(newTimeoutAutoInserterComponent(w, status, w.timeouts[status]))
+		}
+	}
+
+	for _, config := range w.connectorConfigs {
+		parallelCount := w.defaultOpts.parallelCount
+		if config.parallelCount != 0 {
+			parallelCount = config.parallelCount
+		}
+
+		if parallelCount < 2 {
+			w.startComponent(newConnectorConsumerComponent(w, config, 1, 1))
+			continue
+		}
+
+		for i := 1; i <= parallelCount; i++ {
+			w.startComponent(newConnectorConsumerComponent(w, config, i, parallelCount))
+		}
+	}
+
+	for _, state := range sortedKeys(w.runStateChangeHooks) {
+		w.startComponent(newRunStateChangeHookComponent(w, state, w.runStateChangeHooks[state]))
+	}
+
+	w.startComponent(newDeleteConsumerComponent(w))
+
+	// Only start the paused record retry consumer if enabled.
+	if w.pausedRecordsRetry.enabled {
+		w.startComponent(newPausedRecordsRetryComponent(w))
+	}
+}
+
+// sortedKeys returns the keys of m in ascending numeric order.
+func sortedKeys[K ~int | ~int32 | ~int64, V any](m map[K]V) []K {
+	keys := make([]K, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	return keys
 }
 
 // run is a standardise way of running blocking calls with a built-in retry mechanism.
@@ -223,15 +228,30 @@ func (w *Workflow[Type, Status]) run(
 	processName string,
 	process func(ctx context.Context) error,
 	errBackOff time.Duration,
-) {
+) component.Component {
+	return newProcessComponent(role, processName, process, errBackOff, w)
+}
+
+// runProcess drives the retry loop for a single managed process. It keeps the
+// historical state transitions (Idle -> Running -> Shutdown), role scheduling,
+// error logging/metrics and backoff behaviour unchanged.
+func (w *Workflow[Type, Status]) runProcess(
+	ctx context.Context,
+	role string,
+	processName string,
+	process func(ctx context.Context) error,
+	errBackOff time.Duration,
+	ready func(),
+) error {
 	w.updateState(processName, StateIdle)
+	// The initial state is recorded: Run may now return and Stop can observe
+	// the process through States().
+	ready()
 	defer w.updateState(processName, StateShutdown)
-	// Mark that another go routine has launched and been added to internal state
-	w.launching.Done()
 
 	for {
 		err := runOnce(
-			w.ctx,
+			ctx,
 			w.Name(),
 			role,
 			processName,
@@ -248,7 +268,7 @@ func (w *Workflow[Type, Status]) run(
 				"process_name": processName,
 			})
 
-			return
+			return nil
 		}
 	}
 }
@@ -323,8 +343,9 @@ func runOnce(
 func (w *Workflow[Type, Status]) Stop() {
 	w.mu.Lock()
 	cancel := w.cancel
+	components := w.components
 	w.mu.Unlock()
-	
+
 	if cancel == nil {
 		return
 	}
@@ -332,22 +353,9 @@ func (w *Workflow[Type, Status]) Stop() {
 	// Cancel the parent context of the workflow to gracefully shutdown.
 	cancel()
 
-	for {
-		var runningProcesses int
-		for _, state := range w.States() {
-			switch state {
-			case StateUnknown, StateShutdown:
-				continue
-			default:
-				runningProcesses++
-			}
-		}
-
-		// Once all processes have exited then return
-		if runningProcesses == 0 {
-			return
-		}
-
-		time.Sleep(10 * time.Millisecond)
+	// Wait for every managed component to exit. The manager owns the shutdown
+	// wait (unbounded by default) and aggregates any escaped errors.
+	if err := components.Wait(); err != nil {
+		w.logger.Error(w.ctx, err)
 	}
 }

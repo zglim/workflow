@@ -8,6 +8,8 @@ import (
 	"hash/fnv"
 	"strconv"
 	"time"
+
+	"github.com/luno/workflow/internal/component"
 )
 
 type ConnectorConstructor interface {
@@ -32,11 +34,11 @@ type connectorConfig[Type any, Status StatusType] struct {
 	lagAlert      time.Duration
 }
 
-func connectorConsumer[Type any, Status StatusType](
+func newConnectorConsumerComponent[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	config *connectorConfig[Type, Status],
 	shard, totalShards int,
-) {
+) component.Component {
 	role := makeRole(
 		config.name,
 		"connector",
@@ -66,7 +68,7 @@ func connectorConsumer[Type any, Status StatusType](
 	// processName can have the same name as the role. It is the same here due to the fact that there are no enums
 	// that can be converted to a meaningful string
 	processName := role
-	w.run(role, processName, func(ctx context.Context) error {
+	return w.run(role, processName, func(ctx context.Context) error {
 		consumer, err := config.constructor.Make(ctx, role)
 		if err != nil {
 			return err

@@ -7,15 +7,16 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/luno/workflow/internal/component"
 	"github.com/luno/workflow/internal/metrics"
 )
 
-func consumeStepEvents[Type any, Status StatusType](
+func newStepConsumerComponent[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	currentStatus Status,
 	p consumerConfig[Type, Status],
 	shard, totalShards int,
-) {
+) component.Component {
 	role := makeRole(
 		w.Name(),
 		strconv.FormatInt(int64(currentStatus), 10),
@@ -62,7 +63,7 @@ func consumeStepEvents[Type any, Status StatusType](
 		lag = p.lag
 	}
 
-	w.run(role, processName, func(ctx context.Context) error {
+	return w.run(role, processName, func(ctx context.Context) error {
 		stream, err := w.eventStreamer.NewReceiver(
 			ctx,
 			topic,

@@ -35,69 +35,74 @@ func (w *Workflow[Type, Status]) Schedule(
 
 	var lastRun time.Time
 
-	w.launching.Add(1)
-	w.run(role, processName, func(ctx context.Context) error {
-		if lastRun.IsZero() {
-			latestEntry, err := w.recordStore.Latest(ctx, w.Name(), foreignID)
-			if errors.Is(err, ErrRecordNotFound) {
-				// NoReturnErr: Rather set the last run to now if there are no previous runs.
-				lastRun = w.clock.Now()
-			} else if err != nil {
-				return err
-			} else {
-				// Assign the last run timestamp so that we can use that to determine when it should run next.
-				lastRun = latestEntry.CreatedAt
+	w.mu.Lock()
+	components := w.components
+	w.mu.Unlock()
+
+	if components != nil {
+		components.Start(w.run(role, processName, func(ctx context.Context) error {
+			if lastRun.IsZero() {
+				latestEntry, err := w.recordStore.Latest(ctx, w.Name(), foreignID)
+				if errors.Is(err, ErrRecordNotFound) {
+					// NoReturnErr: Rather set the last run to now if there are no previous runs.
+					lastRun = w.clock.Now()
+				} else if err != nil {
+					return err
+				} else {
+					// Assign the last run timestamp so that we can use that to determine when it should run next.
+					lastRun = latestEntry.CreatedAt
+				}
 			}
-		}
 
-		nextRun, ok := schedule.Next(lastRun)
-		if !ok {
-			return fmt.Errorf("no next schedule found for spec: %s", spec)
-		}
+			nextRun, ok := schedule.Next(lastRun)
+			if !ok {
+				return fmt.Errorf("no next schedule found for spec: %s", spec)
+			}
 
-		err = waitUntil(ctx, w.clock, nextRun)
-		if err != nil {
-			return err
-		}
-
-		// If there is a trigger initial value ensure that it is passed down to the trigger function through it's own
-		// set of optional functions.
-		var tOpts []TriggerOption[Type, Status]
-		if options.initialValue != nil {
-			tOpts = append(tOpts, WithInitialValue[Type, Status](options.initialValue))
-		}
-
-		// If a filter has been provided then allow the ability to skip scheduling when false is returned along with
-		// a nil error.
-		var shouldTrigger bool
-		if options.scheduleFilter != nil {
-			ok, err := options.scheduleFilter(ctx)
+			err = waitUntil(ctx, w.clock, nextRun)
 			if err != nil {
 				return err
 			}
 
-			shouldTrigger = ok
-		} else {
-			shouldTrigger = true
-		}
-
-		// Update the last run in order to skip this scheduled slot as it was filtered out.
-		lastRun = w.clock.Now()
-
-		// Filter excludes this run. Wait till the next scheduled time to attempt to trigger again.
-		if shouldTrigger {
-			_, err = w.Trigger(ctx, foreignID, tOpts...)
-			if errors.Is(err, ErrWorkflowInProgress) {
-				// NoReturnErr: Fallthrough to schedule next workflow as there is already one in progress. If this
-				// happens it is likely that we scheduled a workflow and were unable to schedule the next.
-				return nil
-			} else if err != nil {
-				return err
+			// If there is a trigger initial value ensure that it is passed down to the trigger function through it's own
+			// set of optional functions.
+			var tOpts []TriggerOption[Type, Status]
+			if options.initialValue != nil {
+				tOpts = append(tOpts, WithInitialValue[Type, Status](options.initialValue))
 			}
-		}
 
-		return nil
-	}, w.defaultOpts.errBackOff)
+			// If a filter has been provided then allow the ability to skip scheduling when false is returned along with
+			// a nil error.
+			var shouldTrigger bool
+			if options.scheduleFilter != nil {
+				ok, err := options.scheduleFilter(ctx)
+				if err != nil {
+					return err
+				}
+
+				shouldTrigger = ok
+			} else {
+				shouldTrigger = true
+			}
+
+			// Update the last run in order to skip this scheduled slot as it was filtered out.
+			lastRun = w.clock.Now()
+
+			// Filter excludes this run. Wait till the next scheduled time to attempt to trigger again.
+			if shouldTrigger {
+				_, err = w.Trigger(ctx, foreignID, tOpts...)
+				if errors.Is(err, ErrWorkflowInProgress) {
+					// NoReturnErr: Fallthrough to schedule next workflow as there is already one in progress. If this
+					// happens it is likely that we scheduled a workflow and were unable to schedule the next.
+					return nil
+				} else if err != nil {
+					return err
+				}
+			}
+
+			return nil
+		}, w.defaultOpts.errBackOff))
+	}
 
 	return nil
 }

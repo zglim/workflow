@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/luno/workflow/internal/component"
 	"github.com/luno/workflow/internal/metrics"
 )
 
@@ -175,11 +176,11 @@ type timeout[Type any, Status StatusType] struct {
 	TimeoutFunc TimeoutFunc[Type, Status]
 }
 
-func timeoutPoller[Type any, Status StatusType](
+func newTimeoutPollerComponent[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	status Status,
 	timeouts timeouts[Type, Status],
-) {
+) component.Component {
 	role := makeRole(w.Name(), strconv.FormatInt(int64(status), 10), "timeout-consumer")
 	// readableRole can change in value if the string value of the status enum is changed. It should not be used for
 	// storing in the record store, event streamer, timeout store, or offset store.
@@ -200,7 +201,7 @@ func timeoutPoller[Type any, Status StatusType](
 		pauseAfterErrCount = timeouts.pauseAfterErrCount
 	}
 
-	w.run(role, processName, func(ctx context.Context) error {
+	return w.run(role, processName, func(ctx context.Context) error {
 		err := pollTimeouts(ctx, w, status, timeouts, processName, pollingFrequency, pauseAfterErrCount)
 		if err != nil {
 			return err
@@ -210,11 +211,11 @@ func timeoutPoller[Type any, Status StatusType](
 	}, errBackOff)
 }
 
-func timeoutAutoInserterConsumer[Type any, Status StatusType](
+func newTimeoutAutoInserterComponent[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	status Status,
 	timeouts timeouts[Type, Status],
-) {
+) component.Component {
 	role := makeRole(w.Name(), strconv.FormatInt(int64(status), 10), "timeout-auto-inserter-consumer")
 	processName := makeRole(status.String(), "timeout-auto-inserter-consumer")
 
@@ -238,7 +239,7 @@ func timeoutAutoInserterConsumer[Type any, Status StatusType](
 		lagAlert = timeouts.lagAlert
 	}
 
-	w.run(role, processName, func(ctx context.Context) error {
+	return w.run(role, processName, func(ctx context.Context) error {
 		consumerFunc := func(ctx context.Context, r *Run[Type, Status]) (Status, error) {
 			for _, config := range timeouts.transitions {
 				expireAt, err := config.TimerFunc(ctx, r, w.clock.Now())

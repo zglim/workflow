@@ -3,17 +3,18 @@ package workflow
 import (
 	"context"
 
+	"github.com/luno/workflow/internal/component"
 	"github.com/luno/workflow/internal/metrics"
 )
 
 // RunStateChangeHookFunc defines the function signature for all hooks associated to the run.
 type RunStateChangeHookFunc[Type any, Status StatusType] func(ctx context.Context, record *TypedRecord[Type, Status]) error
 
-func runStateChangeHookConsumer[Type any, Status StatusType](
+func newRunStateChangeHookComponent[Type any, Status StatusType](
 	w *Workflow[Type, Status],
 	runState RunState,
 	hook RunStateChangeHookFunc[Type, Status],
-) {
+) component.Component {
 	role := makeRole(
 		w.Name(),
 		runState.String(),
@@ -22,7 +23,7 @@ func runStateChangeHookConsumer[Type any, Status StatusType](
 	)
 
 	processName := makeRole(runState.String(), "run-state-change-hook", "consumer")
-	w.run(role, processName, func(ctx context.Context) error {
+	return w.run(role, processName, func(ctx context.Context) error {
 		topic := RunStateChangeTopic(w.Name())
 		stream, err := w.eventStreamer.NewReceiver(
 			ctx,

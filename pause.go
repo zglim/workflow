@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/luno/workflow/internal/component"
 	"k8s.io/utils/clock"
 )
 
@@ -44,7 +45,7 @@ func maybePause[Type any, Status StatusType](
 	return true, nil
 }
 
-func pausedRecordsRetryConsumer[Type any, Status StatusType](w *Workflow[Type, Status]) {
+func newPausedRecordsRetryComponent[Type any, Status StatusType](w *Workflow[Type, Status]) component.Component {
 	role := makeRole(
 		w.Name(),
 		"paused",
@@ -59,7 +60,7 @@ func pausedRecordsRetryConsumer[Type any, Status StatusType](w *Workflow[Type, S
 		"retry",
 		"consumer",
 	)
-	w.run(role, processName, func(ctx context.Context) error {
+	return w.run(role, processName, func(ctx context.Context) error {
 		topic := RunStateChangeTopic(w.Name())
 		stream, err := w.eventStreamer.NewReceiver(
 			ctx,

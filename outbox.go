@@ -7,11 +7,12 @@ import (
 	"google.golang.org/protobuf/proto"
 	"k8s.io/utils/clock"
 
+	"github.com/luno/workflow/internal/component"
 	"github.com/luno/workflow/internal/metrics"
 	"github.com/luno/workflow/internal/outboxpb"
 )
 
-func outboxConsumer[Type any, Status StatusType](w *Workflow[Type, Status], config outboxConfig) {
+func newOutboxComponent[Type any, Status StatusType](w *Workflow[Type, Status], config outboxConfig) component.Component {
 	role := makeRole(w.Name(), "outbox", "consumer")
 	processName := makeRole("outbox", "consumer")
 
@@ -30,7 +31,7 @@ func outboxConsumer[Type any, Status StatusType](w *Workflow[Type, Status], conf
 		lagAlert = config.lagAlert
 	}
 
-	w.run(role, processName, func(ctx context.Context) error {
+	return w.run(role, processName, func(ctx context.Context) error {
 		return purgeOutbox(
 			ctx,
 			w.Name(),
